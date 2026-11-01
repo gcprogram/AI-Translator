@@ -12,7 +12,7 @@ pip install -r requirements.txt
 python main.py
 ```
 
-In den Einstellungen IP, Port und API-Schlüssel des LM-Studio-Servers eintragen, „Modelle laden“, Modell wählen.
+In den Einstellungen IP, Port und API-Schlüssel (LM Studio verlangt einen Token: Developer-Einstellungen) eintragen, „Modelle laden“, Modell wählen.
 Dann „Datei übersetzen…“. Das Ergebnis erscheint abschnittsweise (mit Original-Anfang/-Ende zur Orientierung)
 und kann im Textfeld von Hand korrigiert werden; „Ergebnis speichern…“ schreibt nur die Übersetzungen
 (TXT, MD, DOCX, PDF, EPUB).
