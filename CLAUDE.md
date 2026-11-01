@@ -8,7 +8,7 @@ Der Chat-Teil lebt jetzt in `gcprogram/AI-Chat-MCP`.
 ## Regeln des Besitzers
 - **Kein Name, keine E-Mail im Code, in Commits, READMEs oder Kommentaren.** Git-Identität ist die
   GitHub-noreply-Adresse (global gesetzt) – nicht ändern. Vor jedem Push `git log --format='%an %ae'` prüfen.
-- Nach erfolgreichen Tests immer committen (ohne Nachfrage); Pushen nur auf Wunsch. Commit-Nachrichten englisch, Code-Kommentare/UI deutsch.
+- Nach erfolgreichen Tests immer committen und pushen (ohne Nachfrage; vorher Autoren prüfen, s. o.). Commit-Nachrichten englisch, Code-Kommentare/UI deutsch.
 - Alle Dateien im Unix-Format (LF), siehe `.gitattributes`; nur `*.bat`, `*.cmd`, `*.ps1` dürfen CRLF haben.
 - Kommunikation auf Deutsch.
 
