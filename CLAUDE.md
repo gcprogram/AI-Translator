@@ -16,6 +16,18 @@ Der Chat-Teil lebt jetzt in `gcprogram/AI-Chat-MCP`.
   eigenständiges Laden des Modells wurde bewusst verworfen (später ggf. `llama-server` als Unterprozess).
 - Das TranslateGemma-Template ist in `translator/prompts.py::gemma_prompt()` nachgebildet und läuft über
   `/v1/completions` (Roh-Prompt). Die Jinja-Datei (`jinja_template_aus_LM-Studio.txt`, gitignored) ist nur Referenz.
+- **Abschnittsgrenzen: keine Überlappung, sondern Kontext.** Abschnitte überlappen nicht; stattdessen wird der Vorgänger
+  (letzte Absätze, ca. 1200 Zeichen, Original + Übersetzung) als bereits beantworteter Gesprächszug vor die Anfrage gestellt
+  (`prompts.gemma_prompt(context=...)`, `pipeline.build_context`). Es gibt nichts zusammenzufügen, daher auch kein Abzählen
+  von Sätzen (scheitert, wenn ein Modell einen Satz teilt) und keinen zweiten KI-Durchlauf. Kontext nur bei gleicher
+  Absatzzahl in Original und Übersetzung (sonst unsichere Zuordnung). Abschaltbar: Einstellungen → Kontext.
+  Abschnitte enden an Absätzen, Kapitel (# / ##) beginnen nach Möglichkeit einen neuen Abschnitt.
+- **Glossar** (Datei `Begriff: Übersetzung`, Dialog „Glossar…“, `config.glossary_path`) gilt für alle Modelle. Nur Begriffe, die im
+  Abschnitt vorkommen, kommen als Satz in den Gemma-Prompt bzw. System-Prompt; fehlt die Übersetzung im Ergebnis, gibt es
+  einen Hinweis (und einen Wiederholversuch). TranslateGemma schlägt keine Begriffe vor (kein Chat-Modell), dort pflegt man sie selbst.
+- **Überschriften**: `documents.py` macht sie zu Markdown (Formatvorlagen, PDF-Schriftgröße, Muster wie „Kapitel 1“/„CHAPTER ONE“/
+  GROSSBUCHSTABEN); `chunking.restore_headings` setzt verlorene `#` nach der Übersetzung wieder ein; `exporters.py` erzeugt daraus
+  DOCX-Überschriftenformate, PDF-Lesezeichen und EPUB-Kapitel mit Inhaltsverzeichnis. Die alten Abschnittsmarken im Textfeld gibt es nicht mehr.
 - LM Studio verlangt einen **API-Token** (Developer-Einstellungen). Eintragen in den Einstellungen
   (`config.json`, gitignored) oder Umgebungsvariable `LM_API_TOKEN` für `scripts/check_server.py`.
   Token niemals ins Repo oder in Chat-Ausgaben schreiben.
@@ -23,24 +35,21 @@ Der Chat-Teil lebt jetzt in `gcprogram/AI-Chat-MCP`.
 ## Tests / Start
 ```bash
 python -m venv .venv && .venv\Scripts\activate && pip install -r requirements.txt
-set PYTHONPATH=. && python -m unittest discover -s tests      # 26 Tests, brauchen keinen LM-Studio-Server
+set PYTHONPATH=. && python -m unittest discover -s tests      # 47 Tests, brauchen keinen LM-Studio-Server
 python main.py
 ```
 
 ## Offene Aufgaben (Reihenfolge)
 1. **BOS prüfen**: `python scripts/check_server.py` (LM Studio läuft, Token nötig). Ergibt, ob `gemma_prompt()` ein
    `<bos>` braucht. Ergebnis hier festhalten und Prompt ggf. anpassen. Zugleich erste echte Probeübersetzung beurteilen.
-2. **Überlappende Übersetzung** (Kernproblem, bisher manuelles Zusammenfügen): Modelle sind nicht deterministisch
-   über Abschnittsgrenzen. Zu entwerfen/entscheiden: (a) Abschnitte überlappen, beide Übersetzungen der
-   Überlappung per Satz-Ausrichtung abgleichen und eine wählen; oder (b) Vorgänger-Abschnitt (Original +
-   Übersetzung) als Kontext voranstellen und nur die neuen Sätze übernehmen. `Chunk` in `chunking.py` hat dafür
-   noch kein Überlappungsfeld (bewusst, YAGNI).
+2. **Kontext-Strategie am echten Modell prüfen** (umgesetzt, aber nur mit Fake-Client getestet): Folgt TranslateGemma dem
+   Mehr-Zug-Prompt (Vorgänger als Gesprächszug) und dem Glossar-Satz im Anweisungstext, ohne den Kontext mitzuübersetzen?
+   Mit/ohne Kontext (Einstellungen) an einem Kapitelübergang vergleichen; Ergebnis hier festhalten.
 3. Chunk-Größe in **Token** statt Zeichen (Budget: Prompt + Ausgabe ≤ ~8192; `MAX_OUTPUT_TOKENS` = 4096 in `pipeline.py`).
-4. Glossar für TranslateGemma (Template hat kein Feld; evtl. Vor-/Nachbearbeitung).
-5. Online-Modell wählbar (andere Base-URL + Chat-Endpunkt; TranslateGemma-Prompt nur für lokales Modell).
-6. Bekannt: Satzteilung trennt Abkürzungen wie „z. B.“ falsch.
+4. Online-Modell wählbar (andere Base-URL + Chat-Endpunkt; TranslateGemma-Prompt nur für lokales Modell).
+5. Bekannt: Satzteilung trennt Abkürzungen wie „z. B.“ falsch.
 
 ## Aufbau
-`translator/`: `documents.py` (lesen) · `chunking.py` · `pipeline.py` (ohne GUI) · `llm_client.py` · `prompts.py` ·
-`glossary.py` · `exporters.py` (Abschnittsmarken `--- BEGINN ABSCHNITT n`, Export) · `config.py` · `gui.py`
-(Worker-Thread → Queue → GUI). Nicht getestet: echte LM-Studio-Antworten und das Aussehen der GUI im Alltag.
+`translator/`: `documents.py` (lesen, Überschriften erkennen) · `chunking.py` · `pipeline.py` (ohne GUI) · `llm_client.py` ·
+`prompts.py` · `glossary.py` · `exporters.py` (Blöcke → TXT/MD/DOCX/PDF/EPUB) · `config.py` · `gui.py` (Worker-Thread → Queue → GUI;
+Original | Übersetzung nebeneinander, Abschnittsmarken `sec<n>` als Tk-Marks) · `dialogs.py` (Glossar-Editor, Suchen/Ersetzen). Nicht getestet: echte LM-Studio-Antworten und das Aussehen der GUI im Alltag.

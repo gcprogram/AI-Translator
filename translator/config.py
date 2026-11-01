@@ -34,6 +34,8 @@ class Config:
     lang_target: str = "de"
     translation_prompt: str = DEFAULT_PROMPT
     max_chunk_chars: int = 3500
+    use_context: bool = True  # Vorgängerabschnitt (Original + Übersetzung) als Kontext mitsenden
+    glossary_path: str = ""  # leer = dictionary.txt im Programmordner
 
     @property
     def base_url(self) -> str:
@@ -53,6 +55,8 @@ class Config:
         except (TypeError, ValueError):
             chars = 3500
         self.max_chunk_chars = max(MIN_CHUNK_CHARS, min(MAX_CHUNK_CHARS, chars))
+        self.use_context = bool(self.use_context)
+        self.glossary_path = str(self.glossary_path or "").strip()
         if not isinstance(self.models, list):
             self.models = []
         if not str(self.translation_prompt).strip():

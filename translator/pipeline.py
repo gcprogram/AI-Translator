@@ -3,15 +3,16 @@ from __future__ import annotations
 
 import logging
 import threading
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Callable, Iterator
 
-from .chunking import Chunk, split_into_chunks
+from .chunking import Chunk, restore_headings, split_into_chunks, split_paragraphs
 from .config import Config
-from .glossary import GLOSSARY_PATH, load_glossary, merge_glossary, parse_glossary, save_glossary
+from .glossary import GLOSSARY_PATH, load_glossary, merge_glossary, missing_terms, parse_glossary, \
+    relevant_terms, save_glossary
 from .llm_client import LLMClient, LLMError, Completion
-from .prompts import GEMMA_STOP, chat_system_prompt, gemma_prompt, glossary_request
+from .prompts import GEMMA_STOP, Context, chat_messages, chat_system_prompt, gemma_prompt, glossary_request
 
 log = logging.getLogger(__name__)
 
@@ -19,6 +20,7 @@ MAX_OUTPUT_TOKENS = 4096
 MAX_SPLIT_DEPTH = 2
 MIN_SPLITTABLE_CHARS = 400
 RETRY_TEMPERATURE = 0.3
+CONTEXT_CHARS = 1200  # Umfang des Vorgängertextes, der als Kontext mitgeschickt wird
 _TERMINAL_PUNCTUATION = tuple(".!?;:…»«\"”’)。！？」』")
 
 GlossaryReview = Callable[[dict[str, str]], dict[str, str]]
@@ -36,18 +38,45 @@ class ChunkResult:
     warnings: list[str] = field(default_factory=list)
 
 
+def build_context(source: str, translation: str, budget: int = CONTEXT_CHARS) -> Context | None:
+    """Die letzten Absätze von Original und Übersetzung als Paar. Nur wenn beide gleich viele Absätze
+    haben, sonst ließe sich nicht sagen, welcher Satz zu welchem gehört - dann lieber kein Kontext."""
+    src, out = split_paragraphs(source), split_paragraphs(translation)
+    if not src or len(src) != len(out):
+        return None
+    taken, size = 0, 0
+    for paragraph in reversed(src):
+        if taken and size + len(paragraph) > budget:
+            break
+        taken += 1
+        size += len(paragraph)
+    return "\n\n".join(src[-taken:]), "\n\n".join(out[-taken:])
+
+
+def _strip_context_echo(text: str, context_translation: str) -> str:
+    """Manche Modelle übersetzen den Kontext erneut mit; dann steht er vorn in der Ausgabe.
+    Bleibt nach dem Abschneiden nichts übrig, war es keine Wiederholung und die Ausgabe bleibt."""
+    echo = context_translation.strip()
+    if echo and text.startswith(echo):
+        return text[len(echo):].lstrip() or text
+    return text
+
+
 class TranslationPipeline:
-    def __init__(self, client: LLMClient, config: Config, glossary_path: Path | str = GLOSSARY_PATH):
+    def __init__(self, client: LLMClient, config: Config, glossary_path: Path | str | None = None):
         self.client = client
         self.config = config
-        self.glossary_path = glossary_path
+        self.glossary_path = Path(glossary_path or config.glossary_path or GLOSSARY_PATH)
 
     # --- Glossar -----------------------------------------------------------------------------
 
     def build_glossary(self, chunks: list[Chunk], review: GlossaryReview | None = None) -> dict[str, str]:
-        """KI-Vorschlag aus dem ersten Abschnitt + gespeichertes Glossar; `review` darf es korrigieren.
-        TranslateGemma hat kein Glossar-Feld im Template, dort bleibt es leer."""
-        if self.config.is_translategemma or not chunks:
+        """Gespeichertes Glossar; bei Chat-Modellen zusätzlich KI-Vorschlag aus dem ersten Abschnitt,
+        den `review` korrigieren darf. TranslateGemma ist kein Chat-Modell und schlägt nichts vor -
+        dort pflegt der Benutzer das Glossar selbst."""
+        if self.config.is_translategemma:
+            return load_glossary(self.glossary_path)
+        if not chunks:
             return {}
         try:
             reply = self.client.chat(
@@ -69,19 +98,27 @@ class TranslationPipeline:
 
     def translate(self, chunks: list[Chunk], glossary: dict[str, str] | None = None,
                   cancel: threading.Event | None = None) -> Iterator[ChunkResult]:
+        previous: ChunkResult | None = None
         for chunk in chunks:
             if cancel is not None and cancel.is_set():
                 raise Cancelled()
-            yield self.translate_chunk(chunk, glossary or {})
+            context = None
+            if previous is not None and self.config.use_context:
+                context = build_context(previous.source, previous.translation)
+            previous = self.translate_chunk(chunk, glossary or {}, context)
+            yield previous
 
-    def translate_chunk(self, chunk: Chunk, glossary: dict[str, str]) -> ChunkResult:
-        text, warnings = self._translate_text(chunk.text, glossary, depth=0)
+    def translate_chunk(self, chunk: Chunk, glossary: dict[str, str], context: Context | None = None) -> ChunkResult:
+        text, warnings = self._translate_text(chunk.text, glossary, context, depth=0)
+        text = restore_headings(chunk.text, text)
         if warnings:
             log.warning("Abschnitt %d: %s", chunk.index, "; ".join(warnings))
         return ChunkResult(chunk.index, chunk.text, text, warnings)
 
-    def _translate_text(self, text: str, glossary: dict[str, str], depth: int) -> tuple[str, list[str]]:
-        completion = self._generate(text, glossary, temperature=0.0)
+    def _translate_text(self, text: str, glossary: dict[str, str], context: Context | None,
+                        depth: int) -> tuple[str, list[str]]:
+        terms = relevant_terms(glossary, text)
+        completion = self._generate(text, terms, context, temperature=0.0)
 
         # Abgeschnitten: eine Wiederholung mit identischen Parametern lieferte dasselbe Ergebnis,
         # deshalb den Text halbieren und die Hälften einzeln übersetzen.
@@ -89,35 +126,42 @@ class TranslationPipeline:
             parts = split_into_chunks(text, len(text) // 2 + 100)
             if len(parts) > 1:
                 outputs, warnings = [], ["Abschnitt wegen Token-Limit geteilt und neu übersetzt"]
+                part_context = context
                 for part in parts:
-                    out, part_warnings = self._translate_text(part.text, glossary, depth + 1)
+                    out, part_warnings = self._translate_text(part.text, glossary, part_context, depth + 1)
                     outputs.append(out)
+                    part_context = build_context(part.text, out) if self.config.use_context else None
                     warnings.extend(w for w in part_warnings if w not in warnings)
                 return "\n\n".join(outputs), warnings
 
-        warnings = self._check(text, completion)
+        warnings = self._check(text, completion, terms)
         if warnings and completion.finish_reason != "length":
-            retry = self._generate(text, glossary, temperature=RETRY_TEMPERATURE)
-            retry_warnings = self._check(text, retry)
+            retry = self._generate(text, terms, context, temperature=RETRY_TEMPERATURE)
+            retry_warnings = self._check(text, retry, terms)
             if len(retry_warnings) < len(warnings):
                 return retry.text, retry_warnings
         return completion.text, warnings
 
-    def _generate(self, text: str, glossary: dict[str, str], temperature: float) -> Completion:
+    def _generate(self, text: str, terms: dict[str, str], context: Context | None,
+                  temperature: float) -> Completion:
         cfg = self.config
         if cfg.is_translategemma:
-            return self.client.complete(
-                cfg.model, gemma_prompt(text, cfg.lang_source, cfg.lang_target),
+            completion = self.client.complete(
+                cfg.model, gemma_prompt(text, cfg.lang_source, cfg.lang_target, terms, context),
                 max_tokens=MAX_OUTPUT_TOKENS, temperature=temperature, stop=GEMMA_STOP,
             )
-        system = chat_system_prompt(cfg.translation_prompt, cfg.lang_source, cfg.lang_target, glossary)
-        return self.client.chat(
-            cfg.model, [{"role": "system", "content": system}, {"role": "user", "content": text}],
-            max_tokens=MAX_OUTPUT_TOKENS, temperature=temperature,
-        )
+        else:
+            system = chat_system_prompt(cfg.translation_prompt, cfg.lang_source, cfg.lang_target, terms)
+            completion = self.client.chat(
+                cfg.model, chat_messages(system, text, context),
+                max_tokens=MAX_OUTPUT_TOKENS, temperature=temperature,
+            )
+        if context:
+            completion = replace(completion, text=_strip_context_echo(completion.text, context[1]))
+        return completion
 
     @staticmethod
-    def _check(source: str, completion: Completion) -> list[str]:
+    def _check(source: str, completion: Completion, terms: dict[str, str]) -> list[str]:
         warnings = []
         if completion.finish_reason == "length":
             warnings.append("Ausgabe abgeschnitten (Token-Limit)")
@@ -125,4 +169,7 @@ class TranslationPipeline:
             warnings.append("Leere Antwort")
         elif source.rstrip().endswith(_TERMINAL_PUNCTUATION) and not completion.text.rstrip().endswith(_TERMINAL_PUNCTUATION):
             warnings.append("Übersetzung endet ohne Satzzeichen - evtl. unvollständig")
+        if completion.text:
+            warnings.extend(f"Glossar nicht eingehalten: {term} → {terms[term]}"
+                            for term in missing_terms(terms, completion.text))
         return warnings

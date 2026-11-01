@@ -35,6 +35,23 @@ def merge_glossary(existing: dict[str, str], proposal: dict[str, str]) -> dict[s
     return merged
 
 
+def _word_start(term: str) -> re.Pattern[str]:
+    """Wortanfang + Begriff, ohne Wortende: findet auch Beugung und Plural ('Potion' in 'Potions')."""
+    return re.compile(rf"(?<!\w){re.escape(term)}", re.IGNORECASE)
+
+
+def relevant_terms(glossary: dict[str, str], text: str) -> dict[str, str]:
+    """Nur die Begriffe, die im Text vorkommen - hält den Prompt klein."""
+    return {term: tr for term, tr in glossary.items() if _word_start(term).search(text)}
+
+
+def missing_terms(terms: dict[str, str], translation: str) -> list[str]:
+    """Begriffe, deren vorgegebene Übersetzung im Ergebnis fehlt. Die letzten zwei Buchstaben
+    werden ignoriert, damit deutsche Beugung ('Vielsafttranks') keinen Fehlalarm auslöst."""
+    return [term for term, tr in terms.items()
+            if not _word_start(tr[:-2] if len(tr) >= 6 else tr).search(translation)]
+
+
 def format_glossary(glossary: dict[str, str]) -> str:
     return "".join(f"{term}: {glossary[term]}\n" for term in sorted(glossary, key=str.lower))
 
