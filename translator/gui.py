@@ -34,6 +34,7 @@ class TranslatorApp:
 
         self.sections: list[int] = []  # Abschnittsnummern in Reihenfolge; Marke 'sec<n>' in beiden Textfeldern
         self.warning_sections: list[int] = []  # Abschnitt je Zeile der Hinweisliste
+        self.live: int | None = None  # Abschnitt, der gerade gestreamt wird
 
         root.title("AI-Translator")
         root.geometry("1100x700")
@@ -184,6 +185,7 @@ class TranslatorApp:
             for widget in (self.source_view, self.output):
                 widget.mark_unset(f"sec{n}")
         self.sections.clear()
+        self.live = None
         self.warning_sections.clear()
         self.warnings.delete(0, tk.END)
         self.source_view.configure(state=tk.NORMAL)
@@ -249,7 +251,11 @@ class TranslatorApp:
             glossary = pipeline.build_glossary(chunks, review=None if config.is_translategemma else self._review_glossary)
             self._emit("status", f"Glossar: {len(glossary)} Begriffe")
 
-            for result in pipeline.translate(chunks, glossary, self.cancel):
+            on_delta = None
+            if config.stream:
+                def on_delta(chunk, delta):
+                    self._emit("delta", chunk.index, chunk.text, delta, len(chunks))
+            for result in pipeline.translate(chunks, glossary, self.cancel, on_delta):
                 self._emit("result", result, len(chunks))
             self._emit("done", "Übersetzung abgeschlossen.")
         except Cancelled:
@@ -278,10 +284,38 @@ class TranslatorApp:
     def _on_status(self, text: str) -> None:
         self.status.set(text)
 
+    def _on_delta(self, index: int, source: str, delta: str, total: int) -> None:
+        """Neues Textstück der laufenden Übersetzung ans Ende hängen (Abschnitt wird beim ersten Stück angelegt)."""
+        if self.live != index:
+            self.live = index
+            self.sections.append(index)
+            self._add_section(self.source_view, index, source)
+            self._add_section(self.output, index, "")
+            self._highlight_source(index)
+            self.status.set(f"Abschnitt {index}/{total} wird übersetzt…")
+        follow = self.output.yview()[1] >= 0.999  # nur mitscrollen, wenn der Benutzer am Ende steht
+        self.output.insert(tk.END, delta)
+        if follow:
+            self.output.see(tk.END)
+
+    def _close_live(self, reason: str) -> None:
+        """Ein unterbrochener Abschnitt bleibt stehen, wird aber in der Hinweisliste markiert."""
+        if self.live is not None:
+            self.warnings.insert(tk.END, f"Abschnitt {self.live}: {reason}")
+            self.warning_sections.append(self.live)
+            self.live = None
+
     def _on_result(self, result: ChunkResult, total: int) -> None:
-        self.sections.append(result.index)
-        self._add_section(self.source_view, result.index, result.source)
-        self._add_section(self.output, result.index, result.translation)
+        if self.live == result.index:  # Streamtext durch das endgültige Ergebnis ersetzen
+            start = f"sec{result.index}"
+            if self.output.get(start, "end-1c") != result.translation:
+                self.output.delete(start, "end-1c")
+                self.output.insert(start, result.translation)
+            self.live = None
+        else:
+            self.sections.append(result.index)
+            self._add_section(self.source_view, result.index, result.source)
+            self._add_section(self.output, result.index, result.translation)
         for warning in result.warnings:
             self.warnings.insert(tk.END, f"Abschnitt {result.index}: {warning}")
             self.warning_sections.append(result.index)
@@ -290,11 +324,13 @@ class TranslatorApp:
         self.status.set(f"Abschnitt {result.index}/{total} übersetzt")
 
     def _on_done(self, text: str) -> None:
+        self._close_live("unvollständig (abgebrochen)")
         self.status.set(text)
         self._set_running(False)
         self.output.edit_reset()  # Strg+Z soll Handarbeit zurücknehmen, nicht ganze Abschnitte
 
     def _on_error(self, text: str) -> None:
+        self._close_live("unvollständig (Fehler)")
         self.status.set("Fehler")
         self._set_running(False)
         messagebox.showerror("Fehler", text)
@@ -348,6 +384,8 @@ class TranslatorApp:
         model = self.model_combo = ttk.Combobox(win, values=cfg.models)
         model.set(cfg.model)
         chunk = ttk.Entry(win); chunk.insert(0, str(cfg.max_chunk_chars))
+        stream = tk.BooleanVar(value=cfg.stream)
+        stream_box = ttk.Checkbutton(win, text="Übersetzung beim Entstehen anzeigen", variable=stream)
         use_context = tk.BooleanVar(value=cfg.use_context)
         context = ttk.Checkbutton(win, text="Vorgängerabschnitt als Kontext mitsenden", variable=use_context)
         prompt = tk.Text(win, height=5, width=48, wrap=tk.WORD); prompt.insert("1.0", cfg.translation_prompt)
@@ -357,7 +395,8 @@ class TranslatorApp:
         row("Modell:", 3, model)
         row("Teilstücklänge (Zeichen):", 4, chunk)
         row("Kontext:", 5, context)
-        row("Prompt (nicht TranslateGemma):", 6, prompt)
+        row("Anzeige:", 6, stream_box)
+        row("Prompt (nicht TranslateGemma):", 7, prompt)
 
         def load_models() -> None:
             client = LLMClient(f"http://{ip.get().strip()}:{port.get().strip()}", key.get())
@@ -379,13 +418,13 @@ class TranslatorApp:
                 return
             cfg.ip, cfg.port, cfg.api_key = ip.get(), port.get(), key.get()
             cfg.model, cfg.max_chunk_chars = model.get().strip(), chars
-            cfg.use_context = use_context.get()
+            cfg.stream, cfg.use_context = stream.get(), use_context.get()
             cfg.translation_prompt = prompt.get("1.0", tk.END).strip()
             cfg.save()
             win.destroy()
 
         buttons = ttk.Frame(win)
-        buttons.grid(row=7, column=0, columnspan=2, pady=15)
+        buttons.grid(row=8, column=0, columnspan=2, pady=15)
         ttk.Button(buttons, text="Modelle laden", command=load_models).pack(side=tk.LEFT, padx=5)
         ttk.Button(buttons, text="Speichern", command=save).pack(side=tk.LEFT, padx=5)
         ttk.Button(buttons, text="Schließen", command=win.destroy).pack(side=tk.LEFT, padx=5)

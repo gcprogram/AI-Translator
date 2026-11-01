@@ -61,10 +61,10 @@ def _join_paragraphs(paragraphs: list[str]) -> str:
 
 
 def _read_pdf(path: Path) -> str:
-    import fitz  # PyMuPDF
+    import pymupdf
 
     blocks: list[tuple[str, float, bool]] = []  # (Text, mittlere Schriftgröße, liegt am Seitenrand)
-    with fitz.open(path) as doc:
+    with pymupdf.open(path) as doc:
         for page in doc:
             margin = page.rect.height * _PAGE_MARGIN
             for block in page.get_text("dict", sort=True)["blocks"]:

@@ -8,7 +8,8 @@ Der Chat-Teil lebt jetzt in `gcprogram/AI-Chat-MCP`.
 ## Regeln des Besitzers
 - **Kein Name, keine E-Mail im Code, in Commits, READMEs oder Kommentaren.** Git-Identität ist die
   GitHub-noreply-Adresse (global gesetzt) – nicht ändern. Vor jedem Push `git log --format='%an %ae'` prüfen.
-- Commits nur auf Wunsch; Commit-Nachrichten englisch, Code-Kommentare/UI deutsch.
+- Nach erfolgreichen Tests immer committen (ohne Nachfrage); Pushen nur auf Wunsch. Commit-Nachrichten englisch, Code-Kommentare/UI deutsch.
+- Alle Dateien im Unix-Format (LF), siehe `.gitattributes`; nur `*.bat`, `*.cmd`, `*.ps1` dürfen CRLF haben.
 - Kommunikation auf Deutsch.
 
 ## Entscheidungen
@@ -22,6 +23,10 @@ Der Chat-Teil lebt jetzt in `gcprogram/AI-Chat-MCP`.
   von Sätzen (scheitert, wenn ein Modell einen Satz teilt) und keinen zweiten KI-Durchlauf. Kontext nur bei gleicher
   Absatzzahl in Original und Übersetzung (sonst unsichere Zuordnung). Abschaltbar: Einstellungen → Kontext.
   Abschnitte enden an Absätzen, Kapitel (# / ##) beginnen nach Möglichkeit einen neuen Abschnitt.
+- **Streaming**: `LLMClient.complete/chat(on_delta=...)` liest SSE; die Pipeline streamt nur den ersten Versuch eines Abschnitts
+  (`translate(on_delta=...)`). Das Endergebnis (Retry, Teilung, `#`-Korrektur, Kontext-Echo entfernt) ersetzt den Streamtext;
+  Abbrechen wirkt mitten im Abschnitt, der Rest bleibt stehen und steht in der Hinweisliste. Gegen TranslateGemma in LM Studio geprüft.
+  Abschaltbar (Einstellungen → Anzeige).
 - **Glossar** (Datei `Begriff: Übersetzung`, Dialog „Glossar…“, `config.glossary_path`) gilt für alle Modelle. Nur Begriffe, die im
   Abschnitt vorkommen, kommen als Satz in den Gemma-Prompt bzw. System-Prompt; fehlt die Übersetzung im Ergebnis, gibt es
   einen Hinweis (und einen Wiederholversuch). TranslateGemma schlägt keine Begriffe vor (kein Chat-Modell), dort pflegt man sie selbst.
@@ -35,7 +40,7 @@ Der Chat-Teil lebt jetzt in `gcprogram/AI-Chat-MCP`.
 ## Tests / Start
 ```bash
 python -m venv .venv && .venv\Scripts\activate && pip install -r requirements.txt
-set PYTHONPATH=. && python -m unittest discover -s tests      # 47 Tests, brauchen keinen LM-Studio-Server
+set PYTHONPATH=. && python -m unittest discover -s tests      # 55 Tests, brauchen keinen LM-Studio-Server
 python main.py
 ```
 

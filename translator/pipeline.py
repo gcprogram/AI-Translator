@@ -97,7 +97,11 @@ class TranslationPipeline:
     # --- Übersetzung -------------------------------------------------------------------------
 
     def translate(self, chunks: list[Chunk], glossary: dict[str, str] | None = None,
-                  cancel: threading.Event | None = None) -> Iterator[ChunkResult]:
+                  cancel: threading.Event | None = None,
+                  on_delta: Callable[[Chunk, str], None] | None = None) -> Iterator[ChunkResult]:
+        """Mit on_delta wird gestreamt: jedes neue Textstück des ersten Übersetzungsversuchs geht sofort an
+        on_delta(chunk, text). Das endgültige Ergebnis kann davon abweichen (Wiederholung, Teilung,
+        Überschriften-Korrektur) und ersetzt den Streamtext. Abbrechen wirkt dann auch mitten im Abschnitt."""
         previous: ChunkResult | None = None
         for chunk in chunks:
             if cancel is not None and cancel.is_set():
@@ -105,20 +109,27 @@ class TranslationPipeline:
             context = None
             if previous is not None and self.config.use_context:
                 context = build_context(previous.source, previous.translation)
-            previous = self.translate_chunk(chunk, glossary or {}, context)
+            stream = None
+            if on_delta is not None:
+                def stream(delta: str, chunk: Chunk = chunk) -> None:
+                    if cancel is not None and cancel.is_set():
+                        raise Cancelled()
+                    on_delta(chunk, delta)
+            previous = self.translate_chunk(chunk, glossary or {}, context, stream)
             yield previous
 
-    def translate_chunk(self, chunk: Chunk, glossary: dict[str, str], context: Context | None = None) -> ChunkResult:
-        text, warnings = self._translate_text(chunk.text, glossary, context, depth=0)
+    def translate_chunk(self, chunk: Chunk, glossary: dict[str, str], context: Context | None = None,
+                        on_delta: Callable[[str], None] | None = None) -> ChunkResult:
+        text, warnings = self._translate_text(chunk.text, glossary, context, depth=0, on_delta=on_delta)
         text = restore_headings(chunk.text, text)
         if warnings:
             log.warning("Abschnitt %d: %s", chunk.index, "; ".join(warnings))
         return ChunkResult(chunk.index, chunk.text, text, warnings)
 
     def _translate_text(self, text: str, glossary: dict[str, str], context: Context | None,
-                        depth: int) -> tuple[str, list[str]]:
+                        depth: int, on_delta: Callable[[str], None] | None = None) -> tuple[str, list[str]]:
         terms = relevant_terms(glossary, text)
-        completion = self._generate(text, terms, context, temperature=0.0)
+        completion = self._generate(text, terms, context, temperature=0.0, on_delta=on_delta)
 
         # Abgeschnitten: eine Wiederholung mit identischen Parametern lieferte dasselbe Ergebnis,
         # deshalb den Text halbieren und die Hälften einzeln übersetzen.
@@ -143,18 +154,19 @@ class TranslationPipeline:
         return completion.text, warnings
 
     def _generate(self, text: str, terms: dict[str, str], context: Context | None,
-                  temperature: float) -> Completion:
+                  temperature: float, on_delta: Callable[[str], None] | None = None) -> Completion:
         cfg = self.config
+        extra = {"on_delta": on_delta} if on_delta is not None else {}
         if cfg.is_translategemma:
             completion = self.client.complete(
                 cfg.model, gemma_prompt(text, cfg.lang_source, cfg.lang_target, terms, context),
-                max_tokens=MAX_OUTPUT_TOKENS, temperature=temperature, stop=GEMMA_STOP,
+                max_tokens=MAX_OUTPUT_TOKENS, temperature=temperature, stop=GEMMA_STOP, **extra,
             )
         else:
             system = chat_system_prompt(cfg.translation_prompt, cfg.lang_source, cfg.lang_target, terms)
             completion = self.client.chat(
                 cfg.model, chat_messages(system, text, context),
-                max_tokens=MAX_OUTPUT_TOKENS, temperature=temperature,
+                max_tokens=MAX_OUTPUT_TOKENS, temperature=temperature, **extra,
             )
         if context:
             completion = replace(completion, text=_strip_context_echo(completion.text, context[1]))

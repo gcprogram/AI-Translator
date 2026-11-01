@@ -2,7 +2,9 @@
 nie als Text zurückgegeben (sonst landet eine Fehlermeldung als 'Übersetzung' im Dokument)."""
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
+from typing import Callable
 
 import requests
 
@@ -74,16 +76,67 @@ class LLMClient:
         except (KeyError, IndexError, TypeError) as exc:
             raise LLMError(f"Unerwartetes Antwortformat: {str(data)[:300]}") from exc
 
+    def _stream(self, path: str, payload: dict, timeout: float, extract_delta,
+                on_delta: Callable[[str], None]) -> Completion:
+        """Server-Sent Events lesen und jedes Textstück an on_delta geben. Wirft on_delta (z. B. beim
+        Abbrechen), wird die Verbindung geschlossen und die Ausnahme weitergereicht."""
+        url = f"{self.base_url}{path}"
+        try:
+            response = self._session.post(url, headers=self._headers(), json=payload, timeout=timeout, stream=True)
+        except requests.Timeout as exc:
+            raise LLMError(f"Zeitüberschreitung bei {url}") from exc
+        except requests.RequestException as exc:
+            raise LLMError(f"Server nicht erreichbar ({url}): {exc}") from exc
+        with response:
+            if response.status_code == 401:
+                raise LLMError("Nicht autorisiert - API-Schlüssel prüfen.")
+            if response.status_code != 200:
+                raise LLMError(f"Serverfehler {response.status_code}: {response.text[:300]}")
+            parts: list[str] = []
+            finish_reason = ""
+            try:
+                for raw in response.iter_lines():  # Bytes: requests würde text/event-stream als Latin-1 lesen
+                    line = raw.decode("utf-8", errors="replace").strip()
+                    if not line.startswith("data:"):
+                        continue
+                    body = line[5:].strip()
+                    if body == "[DONE]":
+                        break
+                    data = json.loads(body)
+                    if "error" in data:
+                        raise LLMError(f"Serverfehler im Stream: {str(data['error'])[:300]}")
+                    choice = data["choices"][0]
+                    delta = extract_delta(choice) or ""
+                    if delta:
+                        parts.append(delta)
+                        on_delta(delta)
+                    finish_reason = choice.get("finish_reason") or finish_reason
+            except requests.RequestException as exc:
+                raise LLMError(f"Verbindung während der Übersetzung abgebrochen: {exc}") from exc
+            except (ValueError, KeyError, IndexError, TypeError) as exc:
+                raise LLMError(f"Unerwartetes Stream-Format: {exc}") from exc
+        if not finish_reason:  # Stream ohne Abschluss: lieber als abgeschnitten behandeln als als fertig
+            finish_reason = "length"
+        return Completion(text="".join(parts).strip(), finish_reason=finish_reason)
+
     def complete(self, model: str, prompt: str, *, max_tokens: int, temperature: float = 0.0,
-                 stop: list[str] | None = None, timeout: float = 300) -> Completion:
+                 stop: list[str] | None = None, timeout: float = 300,
+                 on_delta: Callable[[str], None] | None = None) -> Completion:
+        """Mit on_delta wird gestreamt: jedes neue Textstück geht sofort an on_delta; das Ergebnis ist trotzdem
+        das vollständige Completion."""
         payload = {"model": model, "prompt": prompt, "max_tokens": max_tokens,
-                   "temperature": temperature, "stream": False}
+                   "temperature": temperature, "stream": on_delta is not None}
         if stop:
             payload["stop"] = stop
+        if on_delta is not None:
+            return self._stream("/v1/completions", payload, timeout, lambda c: c.get("text"), on_delta)
         return self._completion("/v1/completions", payload, timeout, lambda c: c["text"])
 
     def chat(self, model: str, messages: list[dict], *, max_tokens: int, temperature: float = 0.0,
-             timeout: float = 300) -> Completion:
+             timeout: float = 300, on_delta: Callable[[str], None] | None = None) -> Completion:
         payload = {"model": model, "messages": messages, "max_tokens": max_tokens,
-                   "temperature": temperature, "stream": False}
+                   "temperature": temperature, "stream": on_delta is not None}
+        if on_delta is not None:
+            return self._stream("/v1/chat/completions", payload, timeout,
+                                lambda c: (c.get("delta") or {}).get("content"), on_delta)
         return self._completion("/v1/chat/completions", payload, timeout, lambda c: c["message"]["content"])

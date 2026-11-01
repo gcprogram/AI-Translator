@@ -173,8 +173,8 @@ class DocumentTest(unittest.TestCase):
         self.assertIn("Zweiter Absatz.", read_document(self.dir / "out.pdf"))
 
     def test_pdf_page_break_is_joined(self):
-        import fitz
-        doc = fitz.open()
+        import pymupdf
+        doc = pymupdf.open()
         doc.new_page().insert_text((72, 700), "Der Satz beginnt hier und")
         doc.new_page().insert_text((72, 72), "endet auf der naechsten Seite.")
         doc.save(self.dir / "p.pdf")
@@ -201,9 +201,9 @@ class HeadingDetectionTest(unittest.TestCase):
         self.assertEqual(mark_headings(text), text)
 
     def test_pdf_font_sizes_and_page_numbers(self):
-        import fitz
+        import pymupdf
         with tempfile.TemporaryDirectory() as tmp:
-            doc = fitz.open()
+            doc = pymupdf.open()
             page = doc.new_page()
             page.insert_text((72, 100), "Das Grosse Buch", fontsize=24)
             page.insert_text((72, 150), "Ein normaler Absatz im Fliesstext des Buches.", fontsize=11)
@@ -268,9 +268,9 @@ class ExportTest(unittest.TestCase):
         self.assertIn("## Unterkapitel", text)
 
     def test_pdf_has_bookmarks_for_headings(self):
-        import fitz
+        import pymupdf
         save_document(self.CONTENT, self.dir / "o.pdf")
-        with fitz.open(self.dir / "o.pdf") as doc:
+        with pymupdf.open(self.dir / "o.pdf") as doc:
             self.assertEqual([entry[1] for entry in doc.get_toc()], ["Das Buch", "Kapitel 1", "Unterkapitel", "Kapitel 2"])
             self.assertGreaterEqual(doc.page_count, 3)  # Kapitel beginnen auf neuer Seite
         text = read_document(self.dir / "o.pdf")
@@ -282,13 +282,19 @@ class FakeClient:
     def __init__(self, handler):
         self.handler, self.calls = handler, []
 
+    def _stream_to(self, completion, kw):
+        if kw.get("on_delta"):
+            for word in completion.text.split(" "):
+                kw["on_delta"](word + " ")
+        return completion
+
     def complete(self, model, prompt, **kw):
         self.calls.append(("complete", prompt, kw))
-        return self.handler(prompt, kw)
+        return self._stream_to(self.handler(prompt, kw), kw)
 
     def chat(self, model, messages, **kw):
         self.calls.append(("chat", messages, kw))
-        return self.handler(messages[-1]["content"], kw)
+        return self._stream_to(self.handler(messages[-1]["content"], kw), kw)
 
 
 def gemma_config():
@@ -375,6 +381,38 @@ class PipelineTest(unittest.TestCase):
         self.assertEqual(glossary, {"Orc": "Ork"})
         self.assertEqual(client.calls, [])
 
+    def test_streaming_passes_deltas_only_for_first_attempt(self):
+        def handler(prompt, kw):  # erster Versuch unvollständig, Wiederholung gut
+            return Completion("Abgehackt", "stop") if kw["temperature"] == 0.0 else Completion("Vollständig.", "stop")
+        client = FakeClient(handler)
+        seen = []
+        pipe = TranslationPipeline(client, gemma_config())
+        chunk = split_into_chunks("Ein ganzer Satz.", 100)[0]
+        result = list(pipe.translate([chunk], on_delta=lambda c, d: seen.append((c.index, d))))[0]
+        self.assertEqual(seen, [(1, "Abgehackt ")])  # Retry wird nicht gestreamt
+        self.assertEqual(result.translation, "Vollständig.")  # Endergebnis ersetzt den Streamtext
+        self.assertIn("on_delta", client.calls[0][2])
+        self.assertNotIn("on_delta", client.calls[1][2])
+
+    def test_without_on_delta_client_is_not_asked_to_stream(self):
+        client = FakeClient(lambda p, kw: Completion("X.", "stop"))
+        list(TranslationPipeline(client, gemma_config()).translate(split_into_chunks("Satz.", 100)))
+        self.assertNotIn("on_delta", client.calls[0][2])
+
+    def test_cancel_works_in_the_middle_of_a_chunk(self):
+        cancel = threading.Event()
+        client = FakeClient(lambda p, kw: Completion("eins zwei drei vier.", "stop"))
+        pipe = TranslationPipeline(client, gemma_config())
+        seen = []
+
+        def on_delta(chunk, delta):
+            seen.append(delta)
+            if len(seen) == 2:
+                cancel.set()
+        with self.assertRaises(Cancelled):
+            list(pipe.translate(split_into_chunks("Satz.", 100), cancel=cancel, on_delta=on_delta))
+        self.assertEqual(seen, ["eins ", "zwei "])  # nach dem Abbruch kommt nichts mehr
+
     def test_cancel(self):
         pipe = TranslationPipeline(FakeClient(lambda p, kw: Completion("A.", "stop")), gemma_config())
         cancel = threading.Event()
@@ -413,6 +451,20 @@ class _Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def _stream(self, body):
+        chat = self.path.endswith("chat/completions")
+        pieces = ["Hal", "lo ä", "— Welt"]
+        make = (lambda t: {"choices": [{"delta": {"content": t}, "finish_reason": None}]}) if chat else             (lambda t: {"choices": [{"text": t, "finish_reason": None}]})
+        events = [make(t) for t in pieces]
+        if body["model"] != "cut":  # "cut": Stream endet ohne finish_reason
+            events.append({"choices": [{"delta": {}, "text": "", "finish_reason": "stop"}]})
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")  # ohne charset: requests würde Latin-1 annehmen
+        self.end_headers()
+        for event in events:
+            self.wfile.write(f"data: {json.dumps(event, ensure_ascii=False)}\n\n".encode("utf-8"))
+        self.wfile.write(b"data: [DONE]\n\n")
+
     def do_GET(self):
         if self.path == "/api/v1/models":
             self._send(200, {"models": [{"key": "a", "type": "llm"}, {"key": "emb", "type": "embedding"}]})
@@ -421,6 +473,8 @@ class _Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+        if body.get("stream") and body["model"] != "bad":
+            return self._stream(body)
         if body["model"] == "bad":
             self._send(500, "<html>kaputt</html>", raw=True)
         elif body["model"] == "garbage":
@@ -452,6 +506,34 @@ class ClientTest(unittest.TestCase):
             self.client.complete("garbage", "p", max_tokens=5)
         with self.assertRaises(LLMError):
             LLMClient("http://127.0.0.1:1").list_models()
+
+    def test_complete_streams_deltas_and_returns_full_text(self):
+        deltas = []
+        c = self.client.complete("m", "p", max_tokens=5, on_delta=deltas.append)
+        self.assertEqual(deltas, ["Hal", "lo ä", "— Welt"])
+        self.assertEqual((c.text, c.finish_reason), ("Hallo ä— Welt", "stop"))
+
+    def test_chat_streams_delta_content(self):
+        deltas = []
+        c = self.client.chat("m", [{"role": "user", "content": "x"}], max_tokens=5, on_delta=deltas.append)
+        self.assertEqual("".join(deltas), "Hallo ä— Welt")
+        self.assertEqual(c.finish_reason, "stop")
+
+    def test_stream_without_finish_reason_counts_as_truncated(self):
+        self.assertEqual(self.client.complete("cut", "p", max_tokens=5, on_delta=lambda d: None).finish_reason, "length")
+
+    def test_exception_in_callback_stops_the_stream(self):
+        class Stop(Exception):
+            pass
+
+        def boom(delta):
+            raise Stop()
+        with self.assertRaises(Stop):
+            self.client.complete("m", "p", max_tokens=5, on_delta=boom)
+
+    def test_stream_errors_raise(self):
+        with self.assertRaises(LLMError):
+            self.client.complete("bad", "p", max_tokens=5, on_delta=lambda d: None)
 
     def test_list_models_skips_embeddings(self):
         self.assertEqual(self.client.list_models(), ["a"])

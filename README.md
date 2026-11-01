@@ -13,7 +13,7 @@ python main.py
 ```
 
 In den Einstellungen IP, Port und API-Schlüssel (LM Studio verlangt einen Token: Developer-Einstellungen) eintragen, „Modelle laden“, Modell wählen.
-Dann „Datei übersetzen…“. Links steht das Original, rechts die Übersetzung; sie erscheint abschnittsweise und ist
+Dann „Datei übersetzen…“. Links steht das Original, rechts die Übersetzung; sie erscheint beim Entstehen (Streaming, in den Einstellungen abschaltbar) und ist
 frei bearbeitbar (Strg+Z, Suchen/Ersetzen mit Strg+F). Der Abschnitt, in dem der Cursor steht, ist links gelb hinterlegt;
 Warnungen stehen in der Hinweisliste (Doppelklick springt hin). „Ergebnis speichern…“ exportiert den Text aus dem rechten Feld.
 
