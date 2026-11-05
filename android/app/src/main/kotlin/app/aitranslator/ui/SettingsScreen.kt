@@ -10,11 +10,13 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
-import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.ExposedDropdownMenuBox
+import androidx.compose.material3.ExposedDropdownMenuDefaults
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.MenuAnchorType
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
@@ -92,14 +94,23 @@ fun SettingsScreen(state: UiState, vm: MainViewModel, snackbar: SnackbarHostStat
                 apiKey, { apiKey = it }, label = { Text("API-Schlüssel (LM Studio: Developer-Einstellungen)") }, singleLine = true,
                 visualTransformation = PasswordVisualTransformation(), modifier = Modifier.fillMaxWidth(),
             )
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                OutlinedTextField(model, { model = it }, label = { Text("Modell") }, singleLine = true, modifier = Modifier.weight(1f))
-                Column {
-                    OutlinedButton(onClick = { modelMenu = true }, enabled = config.models.isNotEmpty()) { Text("Wählen") }
-                    DropdownMenu(expanded = modelMenu, onDismissRequest = { modelMenu = false }) {
-                        config.models.forEach { name ->
-                            DropdownMenuItem(text = { Text(name) }, onClick = { model = name; modelMenu = false })
-                        }
+            // Dropdown mit Pfeil im Feld; die Eingabe bleibt frei tippbar (Modell, das nicht in der Liste steht)
+            ExposedDropdownMenuBox(
+                expanded = modelMenu,
+                onExpandedChange = { if (config.models.isNotEmpty()) modelMenu = it },
+            ) {
+                OutlinedTextField(
+                    value = model, onValueChange = { model = it }, label = { Text("Modell") }, singleLine = true,
+                    trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = modelMenu) },
+                    supportingText = if (config.models.isEmpty()) ({ Text("Erst „Modelle laden“ antippen") }) else null,
+                    modifier = Modifier.menuAnchor(MenuAnchorType.PrimaryEditable).fillMaxWidth(),
+                )
+                ExposedDropdownMenu(expanded = modelMenu, onDismissRequest = { modelMenu = false }) {
+                    config.models.forEach { name ->
+                        DropdownMenuItem(
+                            text = { Text(name) }, onClick = { model = name; modelMenu = false },
+                            contentPadding = ExposedDropdownMenuDefaults.ItemContentPadding,
+                        )
                     }
                 }
             }

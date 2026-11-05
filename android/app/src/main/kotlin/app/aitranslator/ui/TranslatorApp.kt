@@ -33,6 +33,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarDuration
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -70,7 +71,8 @@ fun TranslatorApp(vm: MainViewModel) {
 
     LaunchedEffect(state.message) {
         state.message?.let {
-            snackbar.showSnackbar(it)
+            // Lang und mit Schließen-Knopf: Fehlermeldungen (Server, Datei) dürfen nicht zu übersehen sein
+            snackbar.showSnackbar(it, withDismissAction = true, duration = SnackbarDuration.Long)
             vm.consumeMessage()
         }
     }
@@ -101,6 +103,7 @@ private fun MainScreen(
     var showFormats by remember { mutableStateOf(false) }
     var pendingFormat by remember { mutableStateOf<ExportFormat?>(null) }
     var pendingOpen by remember { mutableStateOf<Uri?>(null) }
+    var showSetup by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
 
     val openLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
@@ -151,7 +154,11 @@ private fun MainScreen(
                 }
             }
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Button(onClick = { openLauncher.launch(arrayOf("*/*")) }, enabled = !state.running, modifier = Modifier.weight(1f)) {
+                Button(
+                    // Ohne Modell käme nach der Dateiwahl nur ein Hinweis: lieber vorher zur Einrichtung führen
+                    onClick = { if (state.config.model.isBlank()) showSetup = true else openLauncher.launch(arrayOf("*/*")) },
+                    enabled = !state.running, modifier = Modifier.weight(1f),
+                ) {
                     Text("Datei übersetzen…")
                 }
                 if (state.running) {
@@ -187,6 +194,22 @@ private fun MainScreen(
             val count = vm.replaceAll(find, replacement, matchCase)
             scope.launch { snackbar.showSnackbar(if (count == 0) "Nicht gefunden." else "$count Ersetzung(en).") }
         }
+    }
+    if (showSetup) {
+        AlertDialog(
+            onDismissRequest = { showSetup = false },
+            title = { Text("Erst einrichten") },
+            text = {
+                Text(
+                    "Bevor eine Datei übersetzt werden kann, braucht die App den Server:\n\n" +
+                        "1. IP-Adresse des PCs, Port und API-Schlüssel von LM Studio eintragen\n" +
+                        "2. „Modelle laden“ antippen und ein Modell wählen\n" +
+                        "3. Speichern",
+                )
+            },
+            confirmButton = { TextButton(onClick = { showSetup = false; onSettings() }) { Text("Zu den Einstellungen") } },
+            dismissButton = { TextButton(onClick = { showSetup = false }) { Text("Abbrechen") } },
+        )
     }
     pendingOpen?.let { uri ->
         AlertDialog(
