@@ -4,3 +4,12 @@ __pycache__
 config.json
 dictionary.txt
 jinja_template_aus_LM-Studio.txt
+
+# Android
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+android/captures/
+android/.kotlin/
+*.iml

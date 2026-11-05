@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Zwei Sprechblasen: Original -> Übersetzung. Die Gruppe hält das Motiv in der Sicherheitszone (66 von 108 dp),
+     sonst schneidet die runde Launcher-Maske die zweite Blase an. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <group
+        android:pivotX="54"
+        android:pivotY="54"
+        android:scaleX="0.8"
+        android:scaleY="0.8"
+        android:translateY="-6">
+        <path
+            android:fillColor="#FFFFFF"
+            android:pathData="M30,34h28a4,4 0 0 1 4,4v14a4,4 0 0 1 -4,4h-18l-8,7v-7h-2a4,4 0 0 1 -4,-4v-14a4,4 0 0 1 4,-4z" />
+        <path
+            android:fillColor="#9CC9F0"
+            android:pathData="M50,58h28a4,4 0 0 1 4,4v14a4,4 0 0 1 -4,4h-2v7l-8,-7h-18a4,4 0 0 1 -4,-4v-14a4,4 0 0 1 4,-4z" />
+    </group>
+</vector>

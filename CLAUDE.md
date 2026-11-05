@@ -33,6 +33,16 @@ Der Chat-Teil lebt jetzt in `gcprogram/AI-Chat-MCP`.
 - **Überschriften**: `documents.py` macht sie zu Markdown (Formatvorlagen, PDF-Schriftgröße, Muster wie „Kapitel 1“/„CHAPTER ONE“/
   GROSSBUCHSTABEN); `chunking.restore_headings` setzt verlorene `#` nach der Übersetzung wieder ein; `exporters.py` erzeugt daraus
   DOCX-Überschriftenformate, PDF-Lesezeichen und EPUB-Kapitel mit Inhaltsverzeichnis. Die alten Abschnittsmarken im Textfeld gibt es nicht mehr.
+- **Android-App** in `android/` (native Kotlin + Compose, Paket `app.aitranslator`): Kern aus Python portiert
+  (`core/`: Chunking, Prompts, Glossar, Pipeline als `Flow`, `LmStudioBackend` mit OkHttp/SSE; `io/`: DocumentReader, Exporters,
+  PdfExporter, PdfTextExtractor; `data/`: Einstellungen, Glossare, Sitzungssicherung; `ui/`). Handy = Client für LM Studio im WLAN;
+  `LlmBackend` ist die Naht für ein späteres On-Device-Modell (noch nicht gebaut). Änderungen an der Kernlogik gehören in **beide**
+  Implementierungen (Python und Kotlin), die Tests spiegeln sich 1:1.
+  Stolpersteine, die schon aufgetreten sind: (1) Androids Regex (ICU) kennt keine Flags wie `(?U)` und definiert `\s`/`\b` anders als die
+  JVM; deshalb `WS = [\s\p{Z}]` und explizite Klassen, nie `(?U)`. (2) Testnamen mit Leerzeichen (Backticks) lassen sich bei minSdk 26
+  nicht dexen: camelCase. (3) PDFBox-Android und `PdfDocument` laufen nur auf einem Gerät; die JVM-Tests werden deshalb zusätzlich als
+  Gerätetests ausgeführt (`sourceSets.androidTest` teilt `src/test/kotlin`). (4) Sind Handy und Emulator gleichzeitig angeschlossen:
+  `ANDROID_SERIAL=emulator-5554` setzen und alle `adb`-Aufrufe mit `-s`, nichts ungefragt auf das echte Gerät installieren.
 - LM Studio verlangt einen **API-Token** (Developer-Einstellungen). Eintragen in den Einstellungen
   (`config.json`, gitignored) oder Umgebungsvariable `LM_API_TOKEN` für `scripts/check_server.py`.
   Token niemals ins Repo oder in Chat-Ausgaben schreiben.
@@ -42,6 +52,11 @@ Der Chat-Teil lebt jetzt in `gcprogram/AI-Chat-MCP`.
 python -m venv .venv && .venv\Scripts\activate && pip install -r requirements.txt
 set PYTHONPATH=. && python -m unittest discover -s tests      # 55 Tests, brauchen keinen LM-Studio-Server
 python main.py
+```
+Android (`cd android`, JDK 17, `ANDROID_HOME` gesetzt):
+```bash
+./gradlew testDebugUnitTest            # 73 JVM-Tests
+./gradlew connectedDebugAndroidTest    # 80 Tests auf Emulator/Gerät (zuvor ANDROID_SERIAL setzen); AVD z. B. aitranslator_test (API 36)
 ```
 
 ## Offene Aufgaben (Reihenfolge)
@@ -53,6 +68,9 @@ python main.py
 3. Chunk-Größe in **Token** statt Zeichen (Budget: Prompt + Ausgabe ≤ ~8192; `MAX_OUTPUT_TOKENS` = 4096 in `pipeline.py`).
 4. Online-Modell wählbar (andere Base-URL + Chat-Endpunkt; TranslateGemma-Prompt nur für lokales Modell).
 5. Bekannt: Satzteilung trennt Abkürzungen wie „z. B.“ falsch.
+6. **Android am echten Setup prüfen**: App auf dem Handy gegen LM Studio im WLAN (IP, Port, Token, Firewall) und mit einem echten
+   Buch (PDF/EPUB) ausprobieren; bisher nur Emulator gegen einen Fake-Server und JVM/Gerätetests. Offen: On-Device-Backend,
+   Vordergrunddienst für lange Läufe bei ausgeschaltetem Bildschirm, PDF-Lesezeichen.
 
 ## Aufbau
 `translator/`: `documents.py` (lesen, Überschriften erkennen) · `chunking.py` · `pipeline.py` (ohne GUI) · `llm_client.py` ·

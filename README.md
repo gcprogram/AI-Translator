@@ -43,8 +43,34 @@ Absätze, *kursiv* und **fett** bleiben erhalten (TXT ohne Auszeichnung, MD mit)
 
 Tests: `python -m unittest discover -s tests` (benötigt `PYTHONPATH=.`).
 
+## Android-App
+
+Im Ordner `android/` liegt eine native Android-App (Kotlin, Jetpack Compose) mit denselben Funktionen: Abschnitte mit Kontext,
+Glossar (mehrere benannte Glossare), Streaming, Überschriften-Erkennung, Bearbeiten, Suchen/Ersetzen und Export nach
+TXT, MD, DOCX, PDF und EPUB. Die Kernlogik ist aus dem Python-Programm nach Kotlin portiert (`android/app/src/main/kotlin/app/aitranslator/core`).
+
+Das Handy ist der **Client** für LM Studio auf dem PC: in LM Studio „Im lokalen Netzwerk bereitstellen“ aktivieren (und ggf. die
+Firewall für den Port freigeben), in der App die IP des PCs, Port und API-Schlüssel eintragen, „Modelle laden“. Im Emulator ist der
+PC unter `10.0.2.2` erreichbar. Das Modell läuft nicht auf dem Handy; `LlmBackend` ist die Schnittstelle, an der später ein
+On-Device-Modell (z. B. llama.cpp) angeschlossen werden kann.
+
+Unterschiede zum Desktop-Programm: Die Übersetzung steht in Abschnittskarten (Original einblendbar, „Neu“ übersetzt einen Abschnitt
+neu) statt in zwei Textfeldern; die Sitzung wird automatisch gesichert und nach einem Neustart wiederhergestellt; das PDF hat keine
+Lesezeichen (Androids `PdfDocument` bietet das nicht).
+
+```bash
+cd android
+./gradlew assembleDebug            # APK: app/build/outputs/apk/debug/app-debug.apk
+./gradlew installDebug             # auf ein angeschlossenes Gerät oder einen Emulator installieren
+./gradlew testDebugUnitTest        # 73 Tests auf der JVM, ohne Gerät
+./gradlew connectedDebugAndroidTest   # dieselben Tests + 7 Gerätetests auf Emulator/Gerät
+```
+
+Voraussetzungen: JDK 17 und Android SDK (`ANDROID_HOME`). Sind mehrere Geräte angeschlossen, vorher `ANDROID_SERIAL` setzen, sonst
+installiert Gradle auf alle.
+
 ## Roadmap
 
 - Token-Budget statt Zeichenzahl für die Abschnittsgröße.
-- Einzelnen Abschnitt neu übersetzen (mit dem Text des Vorgängers aus dem Textfeld als Kontext).
+- Android: Modell auf dem Gerät als zweites Backend; Vordergrunddienst, damit lange Übersetzungen mit ausgeschaltetem Bildschirm weiterlaufen.
 - Alternativ Online-Modelle (OpenAI-kompatibler Endpunkt) wählbar.
