@@ -146,6 +146,13 @@ class DocumentTest(unittest.TestCase):
         self.assertEqual(read_document(self.dir / "a.txt"), "Grüße aus Köln")
         self.assertEqual(read_document(self.dir / "b.txt"), "Grüße")
 
+    def test_windows_line_endings_still_give_paragraphs_and_headings(self):
+        (self.dir / "w.txt").write_bytes(b"Kapitel 1\r\n\r\nDer Anfang\r\n\r\nErster Absatz.\r\n\r\nZweiter Absatz.\r\n")
+        (self.dir / "m.txt").write_bytes(b"Eins.\r\rZwei.\n\nDrei.")
+        text = read_document(self.dir / "w.txt")
+        self.assertEqual(text, "# Kapitel 1 – Der Anfang\n\nErster Absatz.\n\nZweiter Absatz.")
+        self.assertEqual(read_document(self.dir / "m.txt"), "Eins.\n\nZwei.\n\nDrei.")
+
     def test_unsupported(self):
         with self.assertRaises(ValueError):
             read_document(self.dir / "x.xyz")

@@ -35,14 +35,19 @@ def read_document(path: Path | str) -> str:
     return mark_headings(readers[ext](path).strip())
 
 
+def _normalize_newlines(text: str) -> str:
+    """Windows-Zeilenenden (\\r\\n) und alte Mac-Enden (\\r) zu \\n: Absätze erkennt der Rest nur an Leerzeilen (\\n\\n)."""
+    return text.replace("\r\n", "\n").replace("\r", "\n")
+
+
 def _read_text(path: Path) -> str:
     raw = path.read_bytes()
     for encoding in ("utf-8-sig", "cp1252"):
         try:
-            return raw.decode(encoding)
+            return _normalize_newlines(raw.decode(encoding))
         except UnicodeDecodeError:
             continue
-    return raw.decode("utf-8", errors="replace")
+    return _normalize_newlines(raw.decode("utf-8", errors="replace"))
 
 
 def _join_paragraphs(paragraphs: list[str]) -> str:
