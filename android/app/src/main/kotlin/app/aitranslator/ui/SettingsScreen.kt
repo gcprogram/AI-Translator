@@ -94,16 +94,21 @@ fun SettingsScreen(state: UiState, vm: MainViewModel, snackbar: SnackbarHostStat
                 apiKey, { apiKey = it }, label = { Text("API-Schlüssel (LM Studio: Developer-Einstellungen)") }, singleLine = true,
                 visualTransformation = PasswordVisualTransformation(), modifier = Modifier.fillMaxWidth(),
             )
-            // Dropdown mit Pfeil im Feld; die Eingabe bleibt frei tippbar (Modell, das nicht in der Liste steht)
+            // Dropdown mit Pfeil im Feld. Mit geladener Liste reine Auswahl (keine Tastatur); ohne Liste lässt sich
+            // der Modellname noch von Hand eintippen
+            val pickOnly = config.models.isNotEmpty()
             ExposedDropdownMenuBox(
                 expanded = modelMenu,
                 onExpandedChange = { if (config.models.isNotEmpty()) modelMenu = it },
             ) {
                 OutlinedTextField(
                     value = model, onValueChange = { model = it }, label = { Text("Modell") }, singleLine = true,
+                    readOnly = pickOnly,
                     trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = modelMenu) },
                     supportingText = if (config.models.isEmpty()) ({ Text("Erst „Modelle laden“ antippen") }) else null,
-                    modifier = Modifier.menuAnchor(MenuAnchorType.PrimaryEditable).fillMaxWidth(),
+                    modifier = Modifier
+                        .menuAnchor(if (pickOnly) MenuAnchorType.PrimaryNotEditable else MenuAnchorType.PrimaryEditable)
+                        .fillMaxWidth(),
                 )
                 ExposedDropdownMenu(expanded = modelMenu, onDismissRequest = { modelMenu = false }) {
                     config.models.forEach { name ->

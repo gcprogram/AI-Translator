@@ -65,7 +65,8 @@ private enum class Screen { MAIN, SETTINGS, GLOSSARY }
 @Composable
 fun TranslatorApp(vm: MainViewModel) {
     val state by vm.state.collectAsStateWithLifecycle()
-    var screen by rememberSaveable { mutableStateOf(Screen.MAIN) }
+    // Erststart ohne Einrichtung: gleich in die Einstellungen (rememberSaveable: nur beim ersten Aufbau, nicht nach Drehen)
+    var screen by rememberSaveable { mutableStateOf(if (state.config.model.isBlank()) Screen.SETTINGS else Screen.MAIN) }
     val snackbar = remember { SnackbarHostState() }
     BackHandler(enabled = screen != Screen.MAIN) { screen = Screen.MAIN }
 
