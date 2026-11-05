@@ -1,7 +1,11 @@
 package app.aitranslator.core
 
-/** Fehler des Backends; nie als Text zurückgeben, sonst landet eine Fehlermeldung als 'Übersetzung' im Dokument. */
-class LlmException(message: String, cause: Throwable? = null) : Exception(message, cause)
+/**
+ * Fehler des Backends; nie als Text zurückgeben, sonst landet eine Fehlermeldung als 'Übersetzung' im Dokument.
+ * [transient] = voraussichtlich vorübergehend (Verbindung abgerissen, Zeitüberschreitung, Serverfehler 5xx):
+ * ein erneuter Versuch lohnt sich. Falsche Zugangsdaten oder eine ungültige Anfrage (4xx) bleiben dauerhaft.
+ */
+class LlmException(message: String, cause: Throwable? = null, val transient: Boolean = false) : Exception(message, cause)
 
 data class Completion(
     val text: String,

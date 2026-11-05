@@ -1,8 +1,12 @@
 package app.aitranslator
 
+import android.graphics.Bitmap
+import android.graphics.Color
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import app.aitranslator.core.ImageAsset
 import androidx.test.platform.app.InstrumentationRegistry
 import app.aitranslator.core.Config
+import app.aitranslator.data.ChunkData
 import app.aitranslator.data.ConfigStore
 import app.aitranslator.data.GlossaryStore
 import app.aitranslator.data.SectionData
@@ -43,6 +47,33 @@ class PdfRoundTripTest {
         assertTrue(text, "\n\n## Unterkapitel\n\n" in text)
         assertTrue(text, "\n\n# Kapitel 2\n\nSchluss & <Ende>." in text)
         assertTrue("Fließtext ist kein Heading", "# Erster" !in text && "# Lorem" !in text)
+    }
+
+    @Test
+    fun imagesAreEmbeddedAndTextAroundThemSurvives() {
+        val bitmap = Bitmap.createBitmap(400, 200, Bitmap.Config.ARGB_8888).apply { eraseColor(Color.RED) }
+        val png = ByteArrayOutputStream().also { bitmap.compress(Bitmap.CompressFormat.PNG, 100, it) }.toByteArray()
+        val out = ByteArrayOutputStream()
+        Exporters.export(
+            ExportFormat.PDF, "# Titel\n\nVor dem Bild.\n\n[[Bild 1]]\n\nNach dem Bild.\n\n[[Bild 1]]", "Test", "de", out,
+            images = { id -> if (id == 1) ImageAsset(png, "image/png") else null },
+        )
+        PDDocument.load(out.toByteArray().inputStream()).use { doc ->
+            val withImages = doc.pages.count { page -> page.resources.xObjectNames.iterator().hasNext() }
+            assertTrue("Bilder sind im PDF eingebettet", withImages >= 1)
+        }
+        val text = DocumentReader.read("o.pdf", out.toByteArray())
+        assertTrue(text, "Vor dem Bild." in text && "Nach dem Bild." in text)
+    }
+
+    @Test
+    fun undecodableImageIsSkippedInsteadOfBreakingTheExport() {
+        val out = ByteArrayOutputStream()
+        Exporters.export(
+            ExportFormat.PDF, "Text.\n\n[[Bild 1]]\n\nMehr.", "Test", "de", out,
+            images = { ImageAsset("<svg/>".toByteArray(), "image/svg+xml") },
+        )
+        assertTrue("Mehr." in DocumentReader.read("o.pdf", out.toByteArray()))
     }
 
     @Test
@@ -100,8 +131,17 @@ class StoresTest {
         val file = File(context.cacheDir, "session-test.json").apply { delete() }
         val store = SessionStore(file)
         assertNull(store.load())
-        store.save(SessionData("buch.epub", listOf(SectionData(1, "Hello.", "Hallo.", listOf("Hinweis")))))
-        assertEquals("Hallo.", store.load()!!.sections.single().translation)
+        store.save(
+            SessionData(
+                "buch.epub", listOf(SectionData(1, "Hello.", "Hallo.", listOf("Hinweis"))),
+                pending = listOf(ChunkData(2, "Two."), ChunkData(3, "Three.")), total = 3, error = "Abschnitt 2: Server nicht erreichbar",
+            ),
+        )
+        val loaded = store.load()!!
+        assertEquals("Hallo.", loaded.sections.single().translation)
+        assertEquals(listOf(2, 3), loaded.pending.map { it.index }) // offene Abschnitte überleben den Neustart
+        assertEquals(3, loaded.total)
+        assertEquals("Abschnitt 2: Server nicht erreichbar", loaded.error)
         file.writeText("{kaputt")
         assertNull(store.load())
         store.clear()

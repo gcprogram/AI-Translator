@@ -1,5 +1,6 @@
 package app.aitranslator.core
 
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
 
@@ -8,6 +9,9 @@ const val MAX_OUTPUT_TOKENS = 4096
 private const val MAX_SPLIT_DEPTH = 2
 private const val MIN_SPLITTABLE_CHARS = 400
 private const val RETRY_TEMPERATURE = 0.3
+
+/** Wartezeiten vor den Wiederholungen bei vorübergehenden Verbindungsfehlern (WLAN-Aussetzer, Server beschäftigt). */
+val CONNECTION_RETRY_DELAYS_MS = listOf(3_000L, 10_000L, 30_000L)
 
 /** Umfang des Vorgängertextes, der als Kontext mitgeschickt wird. */
 const val CONTEXT_CHARS = 1200
@@ -26,8 +30,8 @@ data class ChunkResult(
  * sonst ließe sich nicht sagen, welcher Satz zu welchem gehört - dann lieber kein Kontext.
  */
 fun buildContext(source: String, translation: String, budget: Int = CONTEXT_CHARS): Context? {
-    val src = splitParagraphs(source)
-    val out = splitParagraphs(translation)
+    val src = splitParagraphs(removeImageTokens(source)) // Bildplatzhalter gehören nicht in den Kontext
+    val out = splitParagraphs(removeImageTokens(translation))
     if (src.isEmpty() || src.size != out.size) return null
     var taken = 0
     var size = 0
@@ -54,7 +58,15 @@ internal fun stripContextEcho(text: String, contextTranslation: String): String 
 /** Prüft, ob der Review-Dialog das Glossar noch ändern soll (nur bei Chat-Modellen mit KI-Vorschlag). */
 typealias GlossaryReview = suspend (Map<String, String>) -> Map<String, String>
 
-class TranslationPipeline(private val backend: LlmBackend, private val config: Config) {
+/**
+ * [onRetry] meldet eine Wiederholung nach einem vorübergehenden Verbindungsfehler (Versuch, Grund). Ein begonnener
+ * Stream wird dabei verworfen: der Aufrufer sollte den bisher angezeigten Text des Abschnitts zurücksetzen.
+ */
+class TranslationPipeline(
+    private val backend: LlmBackend,
+    private val config: Config,
+    private val onRetry: ((attempt: Int, reason: String) -> Unit)? = null,
+) {
 
     /**
      * Bei Chat-Modellen: gespeichertes Glossar plus KI-Vorschlag aus dem ersten Abschnitt, den [review]
@@ -80,14 +92,19 @@ class TranslationPipeline(private val backend: LlmBackend, private val config: C
      * Mit [onDelta] wird gestreamt: jedes neue Textstück des ersten Übersetzungsversuchs geht sofort an
      * onDelta(chunk, text). Das endgültige Ergebnis kann davon abweichen (Wiederholung, Teilung,
      * Überschriften-Korrektur) und ersetzt den Streamtext. Abbrechen (Coroutine) wirkt auch mitten im Abschnitt.
+     * [initialContext] ist der Kontext für den ersten Abschnitt, wenn eine Übersetzung fortgesetzt wird.
      */
     fun translate(
         chunks: List<Chunk>, glossary: Map<String, String> = emptyMap(),
-        onDelta: ((Chunk, String) -> Unit)? = null,
+        initialContext: Context? = null, onDelta: ((Chunk, String) -> Unit)? = null, // onDelta zuletzt: Lambda am Ende bleibt möglich
     ): Flow<ChunkResult> = flow {
         var previous: ChunkResult? = null
         for (chunk in chunks) {
-            val context = if (previous != null && config.useContext) buildContext(previous.source, previous.translation) else null
+            val context = when {
+                !config.useContext -> null
+                previous != null -> buildContext(previous.source, previous.translation)
+                else -> initialContext
+            }
             val stream = onDelta?.let { callback -> { delta: String -> callback(chunk, delta) } }
             val result = translateChunk(chunk, glossary, context, stream)
             previous = result
@@ -99,8 +116,11 @@ class TranslationPipeline(private val backend: LlmBackend, private val config: C
         chunk: Chunk, glossary: Map<String, String>, context: Context? = null,
         onDelta: ((String) -> Unit)? = null,
     ): ChunkResult {
-        val (text, warnings) = translateText(chunk.text, glossary, context, depth = 0, onDelta = onDelta)
-        return ChunkResult(chunk.index, chunk.text, restoreHeadings(chunk.text, text), warnings)
+        // Bildplatzhalter sieht das Modell nie: heraus vor dem Übersetzen, danach an dieselbe Stelle zurück
+        val split = extractImages(chunk.text)
+        if (split.text.isBlank()) return ChunkResult(chunk.index, chunk.text, reinsertImages("", split)) // nur Bilder
+        val (text, warnings) = translateText(split.text, glossary, context, depth = 0, onDelta = onDelta)
+        return ChunkResult(chunk.index, chunk.text, reinsertImages(restoreHeadings(split.text, text), split), warnings)
     }
 
     private suspend fun translateText(
@@ -142,20 +162,37 @@ class TranslationPipeline(private val backend: LlmBackend, private val config: C
         onDelta: ((String) -> Unit)? = null,
     ): Completion {
         val cfg = config
-        var completion = if (cfg.isTranslateGemma) {
-            backend.complete(
-                cfg.model, gemmaPrompt(text, cfg.langSource, cfg.langTarget, terms, context),
-                maxTokens = MAX_OUTPUT_TOKENS, temperature = temperature, stop = GEMMA_STOP, onDelta = onDelta,
-            )
-        } else {
-            val system = chatSystemPrompt(cfg.translationPrompt, cfg.langSource, cfg.langTarget, terms)
-            backend.chat(
-                cfg.model, chatMessages(system, text, context),
-                maxTokens = MAX_OUTPUT_TOKENS, temperature = temperature, onDelta = onDelta,
-            )
+        var completion = retryingOnConnectionErrors {
+            if (cfg.isTranslateGemma) {
+                backend.complete(
+                    cfg.model, gemmaPrompt(text, cfg.langSource, cfg.langTarget, terms, context),
+                    maxTokens = MAX_OUTPUT_TOKENS, temperature = temperature, stop = GEMMA_STOP, onDelta = onDelta,
+                )
+            } else {
+                val system = chatSystemPrompt(cfg.translationPrompt, cfg.langSource, cfg.langTarget, terms)
+                backend.chat(
+                    cfg.model, chatMessages(system, text, context),
+                    maxTokens = MAX_OUTPUT_TOKENS, temperature = temperature, onDelta = onDelta,
+                )
+            }
         }
         if (context != null) completion = completion.copy(text = stripContextEcho(completion.text, context.second))
         return completion
+    }
+
+    /** Wiederholt nur vorübergehende Verbindungsfehler; alles andere (und der letzte Fehlschlag) geht nach oben. */
+    private suspend fun <T> retryingOnConnectionErrors(call: suspend () -> T): T {
+        var attempt = 0
+        while (true) {
+            try {
+                return call()
+            } catch (e: LlmException) {
+                if (!e.transient || attempt >= CONNECTION_RETRY_DELAYS_MS.size) throw e
+                onRetry?.invoke(attempt + 1, e.message.orEmpty())
+                delay(CONNECTION_RETRY_DELAYS_MS[attempt])
+                attempt++
+            }
+        }
     }
 
     private fun check(source: String, completion: Completion, terms: Map<String, String>): List<String> {

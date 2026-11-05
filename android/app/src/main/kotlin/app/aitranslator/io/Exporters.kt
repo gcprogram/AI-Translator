@@ -3,8 +3,11 @@ package app.aitranslator.io
 import app.aitranslator.core.Block
 import app.aitranslator.core.BlockKind
 import app.aitranslator.core.Chapter
+import app.aitranslator.core.ImageAsset
 import app.aitranslator.core.Languages
 import app.aitranslator.core.chapterLevel
+import app.aitranslator.core.extensionForMime
+import app.aitranslator.core.sniffImageSize
 import app.aitranslator.core.inlineRuns
 import app.aitranslator.core.parseBlocks
 import app.aitranslator.core.splitChapters
@@ -34,14 +37,21 @@ enum class ExportFormat(val extension: String, val mimeType: String, val label: 
  * EPUB-Kapitel mit Inhaltsverzeichnis), Absätze bleiben Absätze, **fett** und *kursiv* bleiben erhalten.
  */
 object Exporters {
-    fun export(format: ExportFormat, content: String, title: String, language: String, out: OutputStream) {
+    /**
+     * [images] liefert zu einer Bild-Nummer das Bild. In DOCX, PDF und EPUB stehen die Bilder an der Stelle ihres
+     * Platzhalters `[[Bild n]]`; TXT und MD sind reine Textdateien und lassen sie weg.
+     */
+    fun export(
+        format: ExportFormat, content: String, title: String, language: String, out: OutputStream,
+        images: (Int) -> ImageAsset? = { null },
+    ) {
         val blocks = parseBlocks(content)
         when (format) {
             ExportFormat.TXT -> out.write(toPlainText(blocks).toByteArray(Charsets.UTF_8))
             ExportFormat.MD -> out.write(toMarkdown(blocks).toByteArray(Charsets.UTF_8))
-            ExportFormat.DOCX -> out.write(docx(blocks, title))
-            ExportFormat.EPUB -> out.write(epub(blocks, title, Languages.normalizeCode(language)))
-            ExportFormat.PDF -> PdfExporter.write(blocks, title, out)
+            ExportFormat.DOCX -> out.write(docx(blocks, title, images))
+            ExportFormat.EPUB -> out.write(epub(blocks, title, Languages.normalizeCode(language), images))
+            ExportFormat.PDF -> PdfExporter.write(blocks, title, out, images)
         }
         out.flush()
     }
@@ -75,10 +85,45 @@ object Exporters {
 
     private const val W_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 
-    internal fun docx(blocks: List<Block>, title: String): ByteArray {
+    /** Word kennt diese Bildformate; SVG und WebP lassen sich dort nicht einbetten. */
+    private val DOCX_IMAGE_TYPES = mapOf("png" to "image/png", "jpg" to "image/jpeg", "gif" to "image/gif", "bmp" to "image/bmp")
+    private const val EMU_PER_PIXEL = 9525L // 96 dpi
+    private const val MAX_WIDTH_EMU = 5_486_400L // 6 Zoll: passt in den Satzspiegel von A4 und Letter
+    private const val MAX_HEIGHT_EMU = 7_315_200L // 8 Zoll
+
+    private fun docxPicture(id: Int, ext: String, asset: ImageAsset): String {
+        val (pxW, pxH) = sniffImageSize(asset.bytes) ?: (800 to 600)
+        var cx = pxW * EMU_PER_PIXEL
+        var cy = pxH * EMU_PER_PIXEL
+        val scale = minOf(1.0, MAX_WIDTH_EMU.toDouble() / cx, MAX_HEIGHT_EMU.toDouble() / cy)
+        cx = (cx * scale).toLong().coerceAtLeast(1)
+        cy = (cy * scale).toLong().coerceAtLeast(1)
+        return "<w:p><w:pPr><w:jc w:val=\"center\"/></w:pPr><w:r><w:drawing>" +
+            "<wp:inline distT=\"0\" distB=\"0\" distL=\"0\" distR=\"0\"><wp:extent cx=\"$cx\" cy=\"$cy\"/>" +
+            "<wp:docPr id=\"$id\" name=\"Bild $id\"/><wp:cNvGraphicFramePr>" +
+            "<a:graphicFrameLocks xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\" noChangeAspect=\"1\"/></wp:cNvGraphicFramePr>" +
+            "<a:graphic xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\">" +
+            "<a:graphicData uri=\"http://schemas.openxmlformats.org/drawingml/2006/picture\">" +
+            "<pic:pic xmlns:pic=\"http://schemas.openxmlformats.org/drawingml/2006/picture\"><pic:nvPicPr>" +
+            "<pic:cNvPr id=\"$id\" name=\"img$id.$ext\"/><pic:cNvPicPr/></pic:nvPicPr>" +
+            "<pic:blipFill><a:blip r:embed=\"rIdImg$id\"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill>" +
+            "<pic:spPr><a:xfrm><a:off x=\"0\" y=\"0\"/><a:ext cx=\"$cx\" cy=\"$cy\"/></a:xfrm>" +
+            "<a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom></pic:spPr></pic:pic></a:graphicData></a:graphic></wp:inline>" +
+            "</w:drawing></w:r></w:p>"
+    }
+
+    internal fun docx(blocks: List<Block>, title: String, images: (Int) -> ImageAsset? = { null }): ByteArray {
         val level = chapterLevel(blocks)
         val body = StringBuilder()
+        val media = linkedMapOf<Int, Pair<String, ImageAsset>>() // Bild-Nummer -> (Endung, Bild)
         blocks.forEachIndexed { i, block ->
+            if (block.kind == BlockKind.IMAGE) {
+                val asset = images(block.imageId) ?: return@forEachIndexed
+                val ext = extensionForMime(asset.mime).takeIf { it in DOCX_IMAGE_TYPES } ?: return@forEachIndexed
+                media.getOrPut(block.imageId) { ext to asset }
+                body.append(docxPicture(block.imageId, ext, asset))
+                return@forEachIndexed
+            }
             if (block.kind == BlockKind.HEADING) {
                 val pageBreak = if (i > 0 && level > 0 && block.level <= level) "<w:pageBreakBefore/>" else ""
                 body.append("<w:p><w:pPr><w:pStyle w:val=\"Heading${block.level}\"/>$pageBreak</w:pPr>")
@@ -122,6 +167,7 @@ object Exporters {
                 "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\">" +
                     "<Default Extension=\"rels\" ContentType=\"application/vnd.openxmlformats-package.relationships+xml\"/>" +
                     "<Default Extension=\"xml\" ContentType=\"application/xml\"/>" +
+                    media.values.map { it.first }.distinct().joinToString("") { "<Default Extension=\"$it\" ContentType=\"${DOCX_IMAGE_TYPES.getValue(it)}\"/>" } +
                     "<Override PartName=\"/word/document.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml\"/>" +
                     "<Override PartName=\"/word/styles.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml\"/>" +
                     "<Override PartName=\"/docProps/core.xml\" ContentType=\"application/vnd.openxmlformats-package.core-properties+xml\"/></Types>",
@@ -135,12 +181,22 @@ object Exporters {
             zip.add(
                 "word/_rels/document.xml.rels",
                 "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><Relationships xmlns=\"http://schemas.openxmlformats.org/package/2006/relationships\">" +
-                    "<Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles\" Target=\"styles.xml\"/></Relationships>",
+                    "<Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles\" Target=\"styles.xml\"/>" +
+                    media.entries.joinToString("") { (id, image) ->
+                        "<Relationship Id=\"rIdImg$id\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/image\" Target=\"media/img$id.${image.first}\"/>"
+                    } + "</Relationships>",
             )
+            for ((id, image) in media) {
+                zip.putNextEntry(ZipEntry("word/media/img$id.${image.first}"))
+                zip.write(image.second.bytes)
+                zip.closeEntry()
+            }
             zip.add("word/styles.xml", styles.toString())
             zip.add(
                 "word/document.xml",
-                "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><w:document xmlns:w=\"$W_NS\"><w:body>$body</w:body></w:document>",
+                "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?><w:document xmlns:w=\"$W_NS\" " +
+                    "xmlns:wp=\"http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing\" " +
+                    "xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\"><w:body>$body</w:body></w:document>",
             )
             zip.add(
                 "docProps/core.xml",
@@ -153,11 +209,13 @@ object Exporters {
 
     // --- EPUB --------------------------------------------------------------------------------
 
-    private fun chapterHtml(chapter: Chapter, hasHeadings: Boolean, language: String): String {
+    private fun chapterHtml(chapter: Chapter, hasHeadings: Boolean, language: String, imageHrefs: Map<Int, String>): String {
         val body = StringBuilder()
         if (!hasHeadings) body.append("<h1>${xmlEscape(chapter.title)}</h1>") // Dokument ohne Überschriften
         for (block in chapter.blocks) {
-            if (block.kind == BlockKind.HEADING) {
+            if (block.kind == BlockKind.IMAGE) {
+                imageHrefs[block.imageId]?.let { body.append("<p class=\"img\"><img src=\"$it\" alt=\"Bild ${block.imageId}\"/></p>") }
+            } else if (block.kind == BlockKind.HEADING) {
                 body.append("<h${block.level}>${xmlEscape(stripInline(block.text))}</h${block.level}>")
             } else {
                 body.append("<p>")
@@ -175,9 +233,15 @@ object Exporters {
             "<body>$body</body></html>"
     }
 
-    internal fun epub(blocks: List<Block>, title: String, language: String): ByteArray {
+    internal fun epub(blocks: List<Block>, title: String, language: String, images: (Int) -> ImageAsset? = { null }): ByteArray {
         val hasHeadings = blocks.any { it.kind == BlockKind.HEADING }
         val chapters = splitChapters(blocks, title)
+        // Bild-Nummer -> (Pfad im Buch, Bild); jedes Bild nur einmal, auch wenn es mehrfach vorkommt (Zierlinien)
+        val imageFiles = linkedMapOf<Int, Pair<String, ImageAsset>>()
+        for (id in blocks.filter { it.kind == BlockKind.IMAGE }.map { it.imageId }.distinct()) {
+            images(id)?.let { imageFiles[id] = "images/img_$id.${extensionForMime(it.mime)}" to it }
+        }
+        val imageHrefs = imageFiles.mapValues { it.value.first }
         val modified = DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss'Z'").withZone(ZoneOffset.UTC).format(Instant.now())
         val id = "urn:uuid:${UUID.randomUUID()}"
         val bytes = ByteArrayOutputStream()
@@ -202,7 +266,7 @@ object Exporters {
             val ncxPoints = StringBuilder()
             chapters.forEachIndexed { i, chapter ->
                 val n = i + 1
-                zip.add("OEBPS/chap_$n.xhtml", chapterHtml(chapter, hasHeadings, language))
+                zip.add("OEBPS/chap_$n.xhtml", chapterHtml(chapter, hasHeadings, language, imageHrefs))
                 manifest.append("<item id=\"chap$n\" href=\"chap_$n.xhtml\" media-type=\"application/xhtml+xml\"/>")
                 spine.append("<itemref idref=\"chap$n\"/>")
                 navItems.append("<li><a href=\"chap_$n.xhtml\">${xmlEscape(chapter.title)}</a></li>")
@@ -210,7 +274,17 @@ object Exporters {
                     "<navPoint id=\"np$n\" playOrder=\"$n\"><navLabel><text>${xmlEscape(chapter.title)}</text></navLabel><content src=\"chap_$n.xhtml\"/></navPoint>",
                 )
             }
-            zip.add("OEBPS/style.css", "body{font-family:serif;line-height:1.4}p{margin:0 0 .8em 0}h1,h2,h3{margin:1.2em 0 .6em 0}")
+            for ((imageId, image) in imageFiles) {
+                zip.putNextEntry(ZipEntry("OEBPS/${image.first}"))
+                zip.write(image.second.bytes)
+                zip.closeEntry()
+                manifest.append("<item id=\"img$imageId\" href=\"${image.first}\" media-type=\"${image.second.mime}\"/>")
+            }
+            zip.add(
+                "OEBPS/style.css",
+                "body{font-family:serif;line-height:1.4}p{margin:0 0 .8em 0}h1,h2,h3{margin:1.2em 0 .6em 0}" +
+                    "p.img{text-align:center;text-indent:0}img{max-width:100%;height:auto}",
+            )
             zip.add(
                 "OEBPS/nav.xhtml",
                 "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<!DOCTYPE html>\n<html xmlns=\"http://www.w3.org/1999/xhtml\" xmlns:epub=\"http://www.idpf.org/2007/ops\" " +

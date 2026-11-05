@@ -4,10 +4,16 @@ import android.net.Uri
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
@@ -20,6 +26,7 @@ import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -42,6 +49,8 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -49,14 +58,17 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import app.aitranslator.core.Languages
 import app.aitranslator.core.formatGlossary
+import app.aitranslator.core.imageIds
 import app.aitranslator.io.ExportFormat
 import kotlinx.coroutines.launch
 
@@ -171,7 +183,9 @@ private fun MainScreen(
             Text(state.status, style = MaterialTheme.typography.bodySmall)
             LinearProgressIndicator(progress = { state.progress }, modifier = Modifier.fillMaxWidth())
 
-            if (state.sections.isEmpty()) {
+            if (!state.running && state.pending.isNotEmpty()) ResumeCard(state, onResume = vm::resume)
+
+            if (state.sections.isEmpty() && state.pending.isEmpty()) {
                 Text(
                     "Datei wählen (TXT, MD, PDF, DOCX, EPUB), um sie über LM Studio im Netzwerk zu übersetzen. " +
                         "Server, Token und Modell stehen in den Einstellungen.",
@@ -223,6 +237,31 @@ private fun MainScreen(
     }
 }
 
+/** Unterbrochene Übersetzung: Fehlertext im Wortlaut (zum Kopieren) und Fortsetzen beim ersten offenen Abschnitt. */
+@Composable
+private fun ResumeCard(state: UiState, onResume: () -> Unit) {
+    val failed = state.error != null
+    Card(
+        Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(
+            containerColor = if (failed) MaterialTheme.colorScheme.errorContainer else MaterialTheme.colorScheme.secondaryContainer,
+        ),
+    ) {
+        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Text(
+                if (failed) "Die Übersetzung wurde durch einen Fehler unterbrochen." else "Die Übersetzung ist unterbrochen.",
+                style = MaterialTheme.typography.titleSmall,
+            )
+            state.error?.let { SelectionContainer { Text(it, style = MaterialTheme.typography.bodySmall) } }
+            Text(
+                "${state.pending.size} von ${state.total} Abschnitten sind noch offen. Die fertigen bleiben erhalten.",
+                style = MaterialTheme.typography.bodySmall,
+            )
+            Button(onClick = onResume) { Text("Fortsetzen") }
+        }
+    }
+}
+
 @Composable
 private fun SectionList(state: UiState, vm: MainViewModel) {
     val listState = rememberLazyListState()
@@ -249,13 +288,19 @@ private fun SectionList(state: UiState, vm: MainViewModel) {
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
         items(state.sections, key = { it.index }) { section ->
-            SectionCard(section, state.total, state.running, onEdit = { vm.editSection(section.index, it) }, onRetranslate = { vm.retranslate(section.index) })
+            SectionCard(
+                section, state.total, state.running, onEdit = { vm.editSection(section.index, it) },
+                onRetranslate = { vm.retranslate(section.index) }, loadThumbnail = vm::loadThumbnail,
+            )
         }
     }
 }
 
 @Composable
-private fun SectionCard(section: SectionUi, total: Int, running: Boolean, onEdit: (String) -> Unit, onRetranslate: () -> Unit) {
+private fun SectionCard(
+    section: SectionUi, total: Int, running: Boolean, onEdit: (String) -> Unit, onRetranslate: () -> Unit,
+    loadThumbnail: suspend (Int) -> ImageBitmap?,
+) {
     var showSource by rememberSaveable(section.index) { mutableStateOf(false) }
     Card(Modifier.fillMaxWidth()) {
         Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -277,6 +322,28 @@ private fun SectionCard(section: SectionUi, total: Int, running: Boolean, onEdit
                 value = section.translation, onValueChange = onEdit, readOnly = section.live,
                 modifier = Modifier.fillMaxWidth(),
             )
+            val imageIds = remember(section.translation) { imageIds(section.translation).distinct() }
+            if (imageIds.isNotEmpty()) ImageStrip(imageIds, loadThumbnail)
+        }
+    }
+}
+
+/** Die Bilder, die zu diesem Abschnitt gehören. Ihre Stelle im Text bestimmt der Platzhalter `[[Bild n]]`. */
+@Composable
+private fun ImageStrip(ids: List<Int>, load: suspend (Int) -> ImageBitmap?) {
+    Text(
+        "Bilder in diesem Abschnitt. Den Platzhalter [[Bild n]] im Text verschieben, um die Stelle zu ändern.",
+        style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
+    Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        for (id in ids) {
+            key(id) {
+                val bitmap by produceState<ImageBitmap?>(null, id) { value = load(id) }
+                Box(Modifier.height(96.dp).widthIn(min = 64.dp), contentAlignment = Alignment.Center) {
+                    bitmap?.let { Image(it, contentDescription = "Bild $id", modifier = Modifier.height(96.dp), contentScale = ContentScale.Fit) }
+                        ?: Text("Bild $id", style = MaterialTheme.typography.labelSmall)
+                }
+            }
         }
     }
 }

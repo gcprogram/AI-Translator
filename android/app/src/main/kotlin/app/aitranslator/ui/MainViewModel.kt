@@ -2,20 +2,29 @@ package app.aitranslator.ui
 
 import android.app.Application
 import android.net.Uri
+import android.graphics.BitmapFactory
 import android.provider.OpenableColumns
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import app.aitranslator.core.Chunk
+import app.aitranslator.core.CONNECTION_RETRY_DELAYS_MS
 import app.aitranslator.core.Config
+import app.aitranslator.core.Context
 import app.aitranslator.core.GlossaryReview
+import app.aitranslator.core.ImageCollector
+import app.aitranslator.core.etaText
 import app.aitranslator.core.LmStudioBackend
 import app.aitranslator.core.Languages
 import app.aitranslator.core.TranslationPipeline
 import app.aitranslator.core.buildContext
 import app.aitranslator.core.parseGlossary
 import app.aitranslator.core.splitIntoChunks
+import app.aitranslator.data.ChunkData
 import app.aitranslator.data.ConfigStore
 import app.aitranslator.data.GlossaryStore
+import app.aitranslator.data.ImageStore
 import app.aitranslator.data.SectionData
 import app.aitranslator.data.SessionData
 import app.aitranslator.data.SessionStore
@@ -59,12 +68,17 @@ data class UiState(
     val modelsLoading: Boolean = false,
     /** Einmalige Meldung für die Snackbar. */
     val message: String? = null,
+    /** Noch nicht übersetzte Abschnitte (nach Abbruch, Fehler oder Neustart): lassen sich fortsetzen. */
+    val pending: List<Chunk> = emptyList(),
+    /** Letzter Fehler im Wortlaut; bleibt stehen (und gespeichert), bis fortgesetzt oder neu begonnen wird. */
+    val error: String? = null,
 )
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val configStore = ConfigStore(application)
     val glossaries = GlossaryStore(File(application.filesDir, "glossaries"))
     private val sessionStore = SessionStore(File(application.filesDir, "session.json"))
+    private val images = ImageStore(File(application.filesDir, "images"))
 
     private val _state = MutableStateFlow(UiState(config = configStore.load()))
     val state: StateFlow<UiState> = _state
@@ -73,15 +87,26 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var saveJob: Job? = null
     private var reviewReply: CompletableDeferred<Map<String, String>>? = null
 
+    // Restzeit-Schätzung: bisheriges Tempo (Zeichen pro Zeit) auf den Rest hochgerechnet
+    private var etaStartNanos = 0L
+    private var etaTotalChars = 0L
+    private var etaDoneChars = 0L
+
+    @Volatile
+    private var etaSuffix = ""
+
     init {
-        sessionStore.load()?.takeIf { it.sections.isNotEmpty() }?.let { session ->
+        sessionStore.load()?.takeIf { it.sections.isNotEmpty() || it.pending.isNotEmpty() }?.let { session ->
+            val total = session.total.takeIf { it > 0 } ?: (session.sections.size + session.pending.size)
             _state.update {
                 it.copy(
                     documentName = session.documentName,
                     sections = session.sections.map { s -> SectionUi(s.index, s.source, s.translation, s.warnings) },
-                    total = session.sections.size,
-                    progress = 1f,
+                    pending = session.pending.map { c -> Chunk(c.index, c.text) },
+                    total = total,
+                    progress = session.sections.size.toFloat() / total.coerceAtLeast(1),
                     dirty = true,
+                    error = session.error.ifEmpty { null },
                     status = "Letzte Sitzung wiederhergestellt",
                 )
             }
@@ -136,45 +161,34 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         job?.cancel()
     }
 
-    private suspend fun runDocument(uri: Uri, config: Config) {
-        _state.update { it.copy(running = true, status = "Extrahiere Text…") }
-        try {
-            val (name, text) = withContext(Dispatchers.IO) { readDocument(uri) }
-            if (text.isEmpty()) throw IllegalStateException("Die Datei konnte nicht gelesen werden oder ist leer.")
-            val chunks = splitIntoChunks(text, config.maxChunkChars)
-            // Erst jetzt ist sicher, dass es etwas Neues gibt: die bisherige Übersetzung wird ersetzt
-            _state.update { it.copy(documentName = name, total = chunks.size, sections = emptyList(), progress = 0f, dirty = false) }
-
-            val pipeline = TranslationPipeline(LmStudioBackend(config.baseUrl, config.apiKey), config)
-            val stored = glossaries.load(config.glossaryName)
-            if (!config.isTranslateGemma) _state.update { it.copy(status = "KI analysiert Begriffe…") }
-            val review: GlossaryReview? = if (config.isTranslateGemma) null else { proposal -> awaitGlossaryReview(proposal) }
-            val glossary = pipeline.buildGlossary(chunks, stored, review)
-            if (!config.isTranslateGemma) withContext(Dispatchers.IO) { glossaries.save(config.glossaryName, glossary) }
-            _state.update { it.copy(status = "Glossar: ${glossary.size} Begriffe") }
-
-            val onDelta: ((Chunk, String) -> Unit)? = if (config.stream) { chunk, delta -> appendDelta(chunk, delta) } else null
-            pipeline.translate(chunks, glossary, onDelta).collect { result ->
-                _state.update { s ->
-                    val section = SectionUi(result.index, result.source, result.translation, result.warnings)
-                    val position = s.sections.indexOfFirst { it.index == result.index }
-                    s.copy(
-                        sections = if (position < 0) s.sections + section else s.sections.toMutableList().also { it[position] = section },
-                        progress = result.index.toFloat() / s.total.coerceAtLeast(1),
-                        status = "Abschnitt ${result.index}/${s.total} übersetzt",
-                        dirty = true,
-                    )
-                }
-                scheduleSave()
+    /** Neue Pipeline; bei einer Verbindungsstörung wird der halb angezeigte Text des Abschnitts zurückgesetzt. */
+    private fun newPipeline(config: Config) = TranslationPipeline(
+        LmStudioBackend(config.baseUrl, config.apiKey), config,
+        onRetry = { attempt, reason ->
+            _state.update { s ->
+                s.copy(
+                    status = "Verbindung gestört (Wiederholung $attempt/${CONNECTION_RETRY_DELAYS_MS.size}): $reason",
+                    sections = s.sections.map { if (it.live) it.copy(translation = "") else it },
+                )
             }
+        },
+    )
+
+    /** Führt einen Übersetzungslauf aus und sorgt für Statusanzeige, Fehlertext, Sicherung und Aufräumen. */
+    private suspend fun guarded(startStatus: String, block: suspend () -> Unit) {
+        _state.update { it.copy(running = true, status = startStatus, error = null) }
+        try {
+            block()
             _state.update { it.copy(status = "Übersetzung abgeschlossen.") }
         } catch (e: CancellationException) {
             markLiveIncomplete("unvollständig (abgebrochen)")
             _state.update { it.copy(status = "Abgebrochen.") }
             throw e
         } catch (e: Exception) {
+            val section = _state.value.pending.firstOrNull()?.index
+            val detail = (if (section != null) "Abschnitt $section: " else "") + (e.message ?: e.toString())
             markLiveIncomplete("unvollständig (Fehler)")
-            _state.update { it.copy(status = "Fehler", message = e.message ?: e.toString()) }
+            _state.update { it.copy(status = "Fehler", error = detail, message = detail) }
         } finally {
             _state.update { it.copy(running = false, glossaryReview = null) }
             reviewReply = null
@@ -182,13 +196,93 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    private fun readDocument(uri: Uri): Pair<String, String> {
+    /** Setzt eine unterbrochene Übersetzung beim ersten noch offenen Abschnitt fort. */
+    fun resume() {
+        val s = _state.value
+        if (s.running || s.pending.isEmpty()) return
+        val config = s.config
+        if (config.model.isBlank()) {
+            _state.update { it.copy(message = "Bitte zuerst in den Einstellungen ein Modell wählen.") }
+            return
+        }
+        job = viewModelScope.launch {
+            guarded("Setze Übersetzung fort…") {
+                val previous = s.sections.lastOrNull { it.index < s.pending.first().index }
+                val context = if (config.useContext && previous != null) buildContext(previous.source, previous.translation) else null
+                translateChunks(newPipeline(config), s.pending, glossaries.load(config.glossaryName), context)
+            }
+        }
+    }
+
+    private suspend fun translateChunks(
+        pipeline: TranslationPipeline, chunks: List<Chunk>, glossary: Map<String, String>, initialContext: Context?,
+    ) {
+        val config = _state.value.config
+        val onDelta: ((Chunk, String) -> Unit)? = if (config.stream) { chunk, delta -> appendDelta(chunk, delta) } else null
+        etaStartNanos = System.nanoTime()
+        etaTotalChars = chunks.sumOf { it.text.length.toLong() }
+        etaDoneChars = 0
+        etaSuffix = ""
+        pipeline.translate(chunks, glossary, initialContext, onDelta).collect { result ->
+            etaDoneChars += result.source.length
+            val elapsedMs = (System.nanoTime() - etaStartNanos) / 1_000_000
+            etaSuffix = etaText(elapsedMs, etaDoneChars, etaTotalChars)?.let { " · $it" }.orEmpty()
+            _state.update { s ->
+                val section = SectionUi(result.index, result.source, result.translation, result.warnings)
+                val position = s.sections.indexOfFirst { it.index == result.index }
+                val done = s.sections.count { it.index != result.index } + 1
+                s.copy(
+                    sections = if (position < 0) s.sections + section else s.sections.toMutableList().also { it[position] = section },
+                    pending = s.pending.filter { it.index != result.index },
+                    progress = done.toFloat() / s.total.coerceAtLeast(1),
+                    status = "Abschnitt ${result.index}/${s.total} übersetzt$etaSuffix",
+                    dirty = true,
+                )
+            }
+            scheduleSave()
+        }
+    }
+
+    private suspend fun runDocument(uri: Uri, config: Config) = guarded("Extrahiere Text…") {
+        val (name, text, collected) = withContext(Dispatchers.IO) { readDocument(uri) }
+        if (text.isEmpty()) throw IllegalStateException("Die Datei konnte nicht gelesen werden oder ist leer.")
+        val chunks = splitIntoChunks(text, config.maxChunkChars)
+        // Erst jetzt ist sicher, dass es etwas Neues gibt: die bisherige Übersetzung wird ersetzt
+        _state.update {
+            it.copy(documentName = name, total = chunks.size, sections = emptyList(), pending = chunks, progress = 0f, dirty = false)
+        }
+        withContext(Dispatchers.IO) { images.replaceAll(collected.images) }
+
+        val pipeline = newPipeline(config)
+        val stored = glossaries.load(config.glossaryName)
+        if (!config.isTranslateGemma) _state.update { it.copy(status = "KI analysiert Begriffe…") }
+        val review: GlossaryReview? = if (config.isTranslateGemma) null else { proposal -> awaitGlossaryReview(proposal) }
+        val glossary = pipeline.buildGlossary(chunks, stored, review)
+        if (!config.isTranslateGemma) withContext(Dispatchers.IO) { glossaries.save(config.glossaryName, glossary) }
+        _state.update { it.copy(status = "Glossar: ${glossary.size} Begriffe") }
+
+        translateChunks(pipeline, chunks, glossary, initialContext = null)
+    }
+
+    private fun readDocument(uri: Uri): Triple<String, String, ImageCollector> {
         val resolver = getApplication<Application>().contentResolver
         val name = resolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
             if (cursor.moveToFirst()) cursor.getString(0) else null
         } ?: uri.lastPathSegment.orEmpty()
         val bytes = resolver.openInputStream(uri)?.use { it.readBytes() } ?: throw IllegalStateException("Datei kann nicht geöffnet werden.")
-        return name to DocumentReader.read(name, bytes)
+        val collector = ImageCollector()
+        return Triple(name, DocumentReader.read(name, bytes, collector), collector)
+    }
+
+    /** Vorschaubild zu einer Bild-Nummer (kleiner dekodiert), oder null, wenn es sich nicht darstellen lässt. */
+    suspend fun loadThumbnail(id: Int): ImageBitmap? = withContext(Dispatchers.IO) {
+        val asset = images.load(id) ?: return@withContext null
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeByteArray(asset.bytes, 0, asset.bytes.size, bounds)
+        if (bounds.outWidth <= 0) return@withContext null
+        var sample = 1
+        while (bounds.outWidth / sample > THUMBNAIL_PIXELS) sample *= 2
+        BitmapFactory.decodeByteArray(asset.bytes, 0, asset.bytes.size, BitmapFactory.Options().apply { inSampleSize = sample })?.asImageBitmap()
     }
 
     /** Neues Textstück der laufenden Übersetzung ans Ende des Abschnitts hängen (Abschnitt entsteht beim ersten Stück). */
@@ -197,7 +291,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (position < 0) {
             s.copy(
                 sections = s.sections + SectionUi(chunk.index, chunk.text, delta, live = true),
-                status = "Abschnitt ${chunk.index}/${s.total} wird übersetzt…",
+                status = "Abschnitt ${chunk.index}/${s.total} wird übersetzt…$etaSuffix",
             )
         } else {
             s.copy(sections = s.sections.toMutableList().also { it[position] = it[position].copy(translation = it[position].translation + delta) })
@@ -223,7 +317,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     sections = st.sections.map { if (it.index == index) it.copy(translation = "", warnings = emptyList(), live = true) else it })
             }
             try {
-                val pipeline = TranslationPipeline(LmStudioBackend(config.baseUrl, config.apiKey), config)
+                val pipeline = newPipeline(config)
                 val glossary = glossaries.load(config.glossaryName)
                 val onDelta: ((String) -> Unit)? = if (config.stream) { delta -> appendDelta(Chunk(index, section.source), delta) } else null
                 val result = pipeline.translateChunk(Chunk(index, section.source), glossary, context, onDelta)
@@ -308,7 +402,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     val out = getApplication<Application>().contentResolver.openOutputStream(uri, "w")
                         ?: throw IllegalStateException("Ziel kann nicht geschrieben werden.")
                     out.use {
-                        Exporters.export(format, content, s.documentName.substringBeforeLast('.').ifEmpty { "Übersetzung" }, s.config.langTarget, it)
+                        Exporters.export(format, content, s.documentName.substringBeforeLast('.').ifEmpty { "Übersetzung" }, s.config.langTarget, it, images::load)
                     }
                     null
                 } catch (e: Exception) {
@@ -331,11 +425,24 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private suspend fun saveNow() = withContext(Dispatchers.IO) {
         val s = _state.value
-        if (s.sections.isEmpty()) sessionStore.clear()
-        else sessionStore.save(SessionData(s.documentName, s.sections.map { SectionData(it.index, it.source, it.translation, it.warnings) }))
+        if (s.sections.isEmpty() && s.pending.isEmpty()) {
+            sessionStore.clear()
+            images.clear()
+        } else {
+            sessionStore.save(
+                SessionData(
+                    documentName = s.documentName,
+                    sections = s.sections.map { SectionData(it.index, it.source, it.translation, it.warnings) },
+                    pending = s.pending.map { ChunkData(it.index, it.text) },
+                    total = s.total,
+                    error = s.error.orEmpty(),
+                ),
+            )
+        }
     }
 
     private companion object {
         const val SAVE_DELAY_MS = 600L
+        const val THUMBNAIL_PIXELS = 480
     }
 }

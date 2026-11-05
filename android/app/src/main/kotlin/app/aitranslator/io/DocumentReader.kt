@@ -1,6 +1,10 @@
 package app.aitranslator.io
 
+import app.aitranslator.core.ImageCollector
 import app.aitranslator.core.WS
+import app.aitranslator.core.imageToken
+import app.aitranslator.core.mimeForExtension
+import app.aitranslator.core.sniffMime
 import app.aitranslator.core.joinParagraphs
 import app.aitranslator.core.markHeadings
 import app.aitranslator.core.markPdfHeadings
@@ -23,13 +27,17 @@ object DocumentReader {
 
     fun extensionOf(fileName: String): String = fileName.substringAfterLast('.', "").lowercase()
 
-    /** [fileName] bestimmt das Format (nur die Endung zählt). Wirft [IllegalArgumentException] bei unbekanntem Format. */
-    fun read(fileName: String, bytes: ByteArray): String {
+    /**
+     * [fileName] bestimmt das Format (nur die Endung zählt). Wirft [IllegalArgumentException] bei unbekanntem Format.
+     * Mit [images] werden Bilder aus EPUB und DOCX gesammelt und stehen als Absatz `[[Bild n]]` an ihrer Stelle im Text;
+     * ohne bleiben sie unberücksichtigt. (Aus PDF werden noch keine Bilder übernommen.)
+     */
+    fun read(fileName: String, bytes: ByteArray, images: ImageCollector? = null): String {
         val text = when (val ext = extensionOf(fileName)) {
             "txt", "md" -> readText(bytes)
             "pdf" -> readPdf(bytes)
-            "docx" -> readDocx(bytes)
-            "epub" -> readEpub(bytes)
+            "docx" -> readDocx(bytes, images)
+            "epub" -> readEpub(bytes, images)
             else -> throw IllegalArgumentException("Dateiformat ${if (ext.isEmpty()) "(ohne Endung)" else ".$ext"} wird nicht unterstützt.")
         }
         return markHeadings(text.trim())
@@ -39,12 +47,14 @@ object DocumentReader {
         val withoutBom = if (bytes.size >= 3 && bytes[0] == 0xEF.toByte() && bytes[1] == 0xBB.toByte() && bytes[2] == 0xBF.toByte()) {
             bytes.copyOfRange(3, bytes.size)
         } else bytes
-        return try {
+        val text = try {
             Charsets.UTF_8.newDecoder().onMalformedInput(CodingErrorAction.REPORT)
                 .onUnmappableCharacter(CodingErrorAction.REPORT).decode(ByteBuffer.wrap(withoutBom)).toString()
         } catch (e: CharacterCodingException) {
             charset("windows-1252").decode(ByteBuffer.wrap(withoutBom)).toString()
         }
+        // Windows-Zeilenenden (\r\n) und alte Mac-Enden (\r) zu \n: Absätze erkennt der Rest nur an Leerzeilen (\n\n)
+        return text.replace("\r\n", "\n").replace('\r', '\n')
     }
 
     // --- PDF ---------------------------------------------------------------------------------
@@ -55,6 +65,13 @@ object DocumentReader {
     // --- DOCX --------------------------------------------------------------------------------
 
     private const val W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+    private const val R = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+
+    /** Bild aus dem Archiv in die Sammlung übernehmen; liefert den Platzhalter oder null, wenn die Datei fehlt. */
+    private fun addImage(images: ImageCollector, path: String, entries: Map<String, ByteArray>): String? {
+        val bytes = entries[path]?.takeIf { it.isNotEmpty() } ?: return null
+        return imageToken(images.add(bytes, sniffMime(bytes) ?: mimeForExtension(extensionOf(path))))
+    }
 
     internal fun parseXml(bytes: ByteArray): org.w3c.dom.Document {
         val factory = DocumentBuilderFactory.newInstance()
@@ -100,6 +117,29 @@ object DocumentReader {
         return sb.toString()
     }
 
+    /** Beziehungs-Nummer -> Zielpfad (z. B. rId5 -> word/media/image1.png). */
+    private fun docxRelationships(entries: Map<String, ByteArray>): Map<String, String> {
+        val bytes = entries["word/_rels/document.xml.rels"] ?: return emptyMap()
+        val nodes = parseXml(bytes).getElementsByTagName("Relationship")
+        val rels = mutableMapOf<String, String>()
+        for (i in 0 until nodes.length) {
+            val rel = nodes.item(i) as org.w3c.dom.Element
+            if (rel.getAttribute("TargetMode") != "External") rels[rel.getAttribute("Id")] = resolve("word/", rel.getAttribute("Target"))
+        }
+        return rels
+    }
+
+    /** Beziehungs-Nummern der Bilder in einem Absatz (DrawingML und älteres VML). */
+    private fun embeddedImageIds(paragraph: Node): List<String> {
+        val element = paragraph as org.w3c.dom.Element
+        val ids = mutableListOf<String>()
+        val blips = element.getElementsByTagNameNS("*", "blip")
+        for (i in 0 until blips.length) (blips.item(i) as org.w3c.dom.Element).getAttributeNS(R, "embed").takeIf { it.isNotEmpty() }?.let(ids::add)
+        val vml = element.getElementsByTagNameNS("*", "imagedata")
+        for (i in 0 until vml.length) (vml.item(i) as org.w3c.dom.Element).getAttributeNS(R, "id").takeIf { it.isNotEmpty() }?.let(ids::add)
+        return ids
+    }
+
     private fun headingPrefix(paragraph: Node, styles: Map<String, String>): String {
         val pPr = children(paragraph).firstOrNull { it.localName == "pPr" } ?: return ""
         val pStyle = children(pPr).firstOrNull { it.localName == "pStyle" } as? org.w3c.dom.Element ?: return ""
@@ -113,8 +153,9 @@ object DocumentReader {
         return ""
     }
 
-    private fun readDocx(bytes: ByteArray): String {
+    private fun readDocx(bytes: ByteArray, images: ImageCollector?): String {
         val entries = unzip(bytes)
+        val relationships = if (images != null) docxRelationships(entries) else emptyMap()
         val documentXml = entries["word/document.xml"] ?: throw IllegalArgumentException("Keine gültige DOCX-Datei (word/document.xml fehlt).")
         val styles = styleNames(entries)
         val body = parseXml(documentXml).getElementsByTagNameNS(W, "body").item(0)
@@ -130,6 +171,11 @@ object DocumentReader {
                 "p" -> {
                     val text = paragraphText(item).trim()
                     if (text.isNotEmpty()) blocks.add(headingPrefix(item, styles) + text)
+                    if (images != null) {
+                        for (id in embeddedImageIds(item)) {
+                            relationships[id]?.let { path -> addImage(images, path, entries) }?.let { blocks.add(it) }
+                        }
+                    }
                 }
             }
         }
@@ -141,7 +187,7 @@ object DocumentReader {
     private fun resolve(baseDir: String, href: String): String {
         val decoded = URLDecoder.decode(href.substringBefore('#').replace("+", "%2B"), "UTF-8")
         val parts = mutableListOf<String>()
-        for (segment in (baseDir + decoded).split('/')) {
+        for (segment in ((if (decoded.startsWith("/")) "" else baseDir) + decoded).split('/')) { // '/x' ist ab Archivwurzel
             when (segment) {
                 "", "." -> Unit
                 ".." -> if (parts.isNotEmpty()) parts.removeAt(parts.lastIndex)
@@ -151,7 +197,7 @@ object DocumentReader {
         return parts.joinToString("/")
     }
 
-    private fun readEpub(bytes: ByteArray): String {
+    private fun readEpub(bytes: ByteArray, images: ImageCollector?): String {
         val entries = unzip(bytes)
         val container = entries["META-INF/container.xml"] ?: throw IllegalArgumentException("Keine gültige EPUB-Datei (container.xml fehlt).")
         val opfPath = Jsoup.parse(String(container, Charsets.UTF_8), "", Parser.xmlParser()).selectFirst("rootfile[full-path]")
@@ -167,9 +213,19 @@ object DocumentReader {
 
         val blocks = mutableListOf<String>()
         for (item in items) {
-            val content = entries[resolve(baseDir, item.attr("href"))] ?: continue
+            val chapterPath = resolve(baseDir, item.attr("href"))
+            val content = entries[chapterPath] ?: continue
+            val chapterDir = chapterPath.substringBeforeLast('/', "").let { if (it.isEmpty()) "" else "$it/" }
             val soup = Jsoup.parse(String(content, Charsets.UTF_8))
-            for (tag in soup.select("h1, h2, h3, h4, h5, h6, p, li, blockquote")) {
+            // img/image stehen in Dokumentreihenfolge zwischen den Textabsätzen: so bleibt ein Bild an seiner Stelle
+            for (tag in soup.select("h1, h2, h3, h4, h5, h6, p, li, blockquote, img, image")) {
+                if (tag.tagName() == "img" || tag.tagName() == "image") {
+                    val source = listOf("src", "xlink:href", "href").firstNotNullOfOrNull { tag.attr(it).ifEmpty { null } }
+                    if (images != null && source != null && !source.startsWith("data:") && "://" !in source) {
+                        addImage(images, resolve(chapterDir, source), entries)?.let { blocks.add(it) }
+                    }
+                    continue
+                }
                 if (tag.tagName() == "blockquote" && tag.selectFirst("p") != null) continue // Inhalt kommt über die <p>
                 val text = tag.text().replace(SPACES, " ").trim()
                 if (text.isEmpty()) continue

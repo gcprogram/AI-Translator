@@ -2,7 +2,10 @@ package app.aitranslator.data
 
 import android.content.Context
 import app.aitranslator.core.Config
+import app.aitranslator.core.ImageAsset
+import app.aitranslator.core.extensionForMime
 import app.aitranslator.core.formatGlossary
+import app.aitranslator.core.mimeForExtension
 import app.aitranslator.core.parseGlossary
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
@@ -55,11 +58,43 @@ class GlossaryStore(private val dir: File) {
     }
 }
 
+/**
+ * Die Bilder des geöffneten Buches als Dateien (Nummer = Dateiname). Sie liegen auf dem Gerät, nicht im Speicher,
+ * damit ein Buch mit vielen Bildern den Arbeitsspeicher nicht füllt und eine wiederhergestellte Sitzung die Bilder noch hat.
+ */
+class ImageStore(private val dir: File) {
+    fun replaceAll(images: Map<Int, ImageAsset>) {
+        dir.deleteRecursively()
+        dir.mkdirs()
+        for ((id, asset) in images) File(dir, "$id.${extensionForMime(asset.mime)}").writeBytes(asset.bytes)
+    }
+
+    fun load(id: Int): ImageAsset? {
+        val file = dir.listFiles()?.firstOrNull { it.nameWithoutExtension == id.toString() } ?: return null
+        return ImageAsset(file.readBytes(), mimeForExtension(file.extension))
+    }
+
+    fun clear() {
+        dir.deleteRecursively()
+    }
+}
+
 @Serializable
 data class SectionData(val index: Int, val source: String, val translation: String, val warnings: List<String> = emptyList())
 
+/** Ein noch nicht übersetzter Abschnitt; so lässt sich eine unterbrochene Übersetzung auch nach einem Neustart fortsetzen. */
 @Serializable
-data class SessionData(val documentName: String = "", val sections: List<SectionData> = emptyList())
+data class ChunkData(val index: Int, val text: String)
+
+@Serializable
+data class SessionData(
+    val documentName: String = "",
+    val sections: List<SectionData> = emptyList(),
+    val pending: List<ChunkData> = emptyList(),
+    val total: Int = 0,
+    /** Meldung des letzten Fehlers, damit sie nicht mit dem Verschwinden der Einblendung verloren geht. */
+    val error: String = "",
+)
 
 /**
  * Sichert die Übersetzung nach jedem Abschnitt und jeder Änderung. Android beendet Apps im Hintergrund jederzeit;

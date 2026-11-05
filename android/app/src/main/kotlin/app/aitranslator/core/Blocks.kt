@@ -9,10 +9,10 @@ private val HEADING_LINE = Regex("""^(#{1,6})[ \t]+(.*\S)[ \t]*$""")
 private val INLINE = Regex("""\*\*(?=\S)(.+?)(?<=\S)\*\*|\*(?=\S)(.+?)(?<=\S)\*""")
 private val BLANK_LINE = Regex("""\n[ \t]*\n""")
 
-enum class BlockKind { HEADING, PARAGRAPH }
+enum class BlockKind { HEADING, PARAGRAPH, IMAGE }
 
-/** [level] nur für Überschriften (1-6). */
-data class Block(val kind: BlockKind, val text: String, val level: Int = 0)
+/** [level] nur für Überschriften (1-6), [imageId] nur für Bilder (Nummer aus dem Platzhalter `[[Bild n]]`). */
+data class Block(val kind: BlockKind, val text: String, val level: Int = 0, val imageId: Int = 0)
 
 data class Run(val text: String, val bold: Boolean, val italic: Boolean)
 
@@ -28,7 +28,14 @@ fun parseBlocks(content: String): List<Block> {
         val lines = mutableListOf<String>()
         for (line in chunk.split("\n")) {
             val heading = HEADING_LINE.matchEntire(line.trim())
-            if (heading != null) {
+            val imageId = imageIdOfLine(line)
+            if (imageId != null) {
+                if (lines.isNotEmpty()) {
+                    blocks.add(Block(BlockKind.PARAGRAPH, lines.joinToString("\n")))
+                    lines.clear()
+                }
+                blocks.add(Block(BlockKind.IMAGE, "", imageId = imageId))
+            } else if (heading != null) {
                 if (lines.isNotEmpty()) {
                     blocks.add(Block(BlockKind.PARAGRAPH, lines.joinToString("\n")))
                     lines.clear()
@@ -88,7 +95,9 @@ fun splitChapters(blocks: List<Block>, title: String): List<Chapter> {
     return titles.zip(groups).map { (t, g) -> Chapter(t, g) }
 }
 
-fun toMarkdown(blocks: List<Block>): String =
-    blocks.joinToString("\n\n") { if (it.kind == BlockKind.HEADING) "${"#".repeat(it.level)} ${it.text}" else it.text } + "\n"
+// TXT und MD sind einzelne Textdateien: Bilder haben dort keinen Platz und entfallen.
+fun toMarkdown(blocks: List<Block>): String = blocks.filter { it.kind != BlockKind.IMAGE }
+    .joinToString("\n\n") { if (it.kind == BlockKind.HEADING) "${"#".repeat(it.level)} ${it.text}" else it.text } + "\n"
 
-fun toPlainText(blocks: List<Block>): String = blocks.joinToString("\n\n") { stripInline(it.text) } + "\n"
+fun toPlainText(blocks: List<Block>): String =
+    blocks.filter { it.kind != BlockKind.IMAGE }.joinToString("\n\n") { stripInline(it.text) } + "\n"

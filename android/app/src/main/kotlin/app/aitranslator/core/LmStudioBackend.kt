@@ -71,14 +71,16 @@ class LmStudioBackend(
                         call.execute()
                     } catch (e: SocketTimeoutException) {
                         ensureActive()
-                        throw LlmException("Zeitüberschreitung bei ${request.url}", e)
+                        throw LlmException("Zeitüberschreitung bei ${request.url}", e, transient = true)
                     } catch (e: IOException) {
                         ensureActive()
-                        throw LlmException("Server nicht erreichbar (${request.url}): ${e.message}", e)
+                        throw LlmException("Server nicht erreichbar (${request.url}): ${e.message}", e, transient = true)
                     }
                     response.use {
                         if (it.code == 401) throw LlmException("Nicht autorisiert - API-Schlüssel prüfen.")
-                        if (it.code != 200) throw LlmException("Serverfehler ${it.code}: ${it.body?.string().orEmpty().take(300)}")
+                        if (it.code != 200) {
+                            throw LlmException("Serverfehler ${it.code}: ${it.body?.string().orEmpty().take(300)}", transient = it.code >= 500)
+                        }
                         handle(it)
                     }
                 } finally {
@@ -202,7 +204,7 @@ class LmStudioBackend(
                 source.readUtf8Line()?.trim()
             } catch (e: IOException) {
                 ensureActive()
-                throw LlmException("Verbindung während der Übersetzung abgebrochen: ${e.message}", e)
+                throw LlmException("Verbindung während der Übersetzung abgebrochen: ${e.message}", e, transient = true)
             } ?: break
             if (!line.startsWith("data:")) continue
             val body = line.removePrefix("data:").trim()

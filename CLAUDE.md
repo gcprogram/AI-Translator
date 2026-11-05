@@ -38,7 +38,13 @@ Der Chat-Teil lebt jetzt in `gcprogram/AI-Chat-MCP`.
   PdfExporter, PdfTextExtractor; `data/`: Einstellungen, Glossare, Sitzungssicherung; `ui/`). Handy = Client für LM Studio im WLAN;
   `LlmBackend` ist die Naht für ein späteres On-Device-Modell (noch nicht gebaut). Änderungen an der Kernlogik gehören in **beide**
   Implementierungen (Python und Kotlin), die Tests spiegeln sich 1:1.
-  Stolpersteine, die schon aufgetreten sind: (1) Androids Regex (ICU) kennt keine Flags wie `(?U)` und definiert `\s`/`\b` anders als die
+  Bilder: Im Text stehen sie als eigener Absatz `[[Bild n]]` (`core/Images.kt`); `Pipeline.translateChunk` nimmt sie vor dem Modellaufruf
+  heraus und setzt sie danach an dieselbe Absatzposition zurück (proportional, wenn das Modell die Absatzzahl ändert). Die Dateien liegen
+  in `filesDir/images` (`ImageStore`), nicht im Speicher. Gelesen aus EPUB (img/svg-image in Dokumentreihenfolge) und DOCX (Beziehungen),
+  geschrieben in DOCX/EPUB/PDF; nicht aus PDF. Fortsetzen: `SessionData.pending` hält die noch offenen Abschnitte; `LlmException.transient`
+  steuert die automatische Wiederholung (`CONNECTION_RETRY_DELAYS_MS`). Restzeit: `core/Eta.kt`.
+  Stolpersteine, die schon aufgetreten sind: (0) Textdateien mit Windows-Zeilenenden (`\r\n`) erzeugten keine Absätze (Absatzerkennung
+  verlangt `\n\n`): `readText` normalisiert jetzt, in Kotlin und Python (`_read_text`). (1) Androids Regex (ICU) kennt keine Flags wie `(?U)` und definiert `\s`/`\b` anders als die
   JVM; deshalb `WS = [\s\p{Z}]` und explizite Klassen, nie `(?U)`. (2) Testnamen mit Leerzeichen (Backticks) lassen sich bei minSdk 26
   nicht dexen: camelCase. (3) PDFBox-Android und `PdfDocument` laufen nur auf einem Gerät; die JVM-Tests werden deshalb zusätzlich als
   Gerätetests ausgeführt (`sourceSets.androidTest` teilt `src/test/kotlin`). (4) Sind Handy und Emulator gleichzeitig angeschlossen:
@@ -50,13 +56,13 @@ Der Chat-Teil lebt jetzt in `gcprogram/AI-Chat-MCP`.
 ## Tests / Start
 ```bash
 python -m venv .venv && .venv\Scripts\activate && pip install -r requirements.txt
-set PYTHONPATH=. && python -m unittest discover -s tests      # 55 Tests, brauchen keinen LM-Studio-Server
+set PYTHONPATH=. && python -m unittest discover -s tests      # 56 Tests, brauchen keinen LM-Studio-Server
 python main.py
 ```
 Android (`cd android`, JDK 17, `ANDROID_HOME` gesetzt):
 ```bash
-./gradlew testDebugUnitTest            # 73 JVM-Tests
-./gradlew connectedDebugAndroidTest    # 80 Tests auf Emulator/Gerät (zuvor ANDROID_SERIAL setzen); AVD z. B. aitranslator_test (API 36)
+./gradlew testDebugUnitTest            # 115 JVM-Tests
+./gradlew connectedDebugAndroidTest    # 124 Tests auf Emulator/Gerät (zuvor ANDROID_SERIAL setzen); AVD z. B. aitranslator_test (API 36)
 ```
 
 ## Offene Aufgaben (Reihenfolge)
@@ -69,8 +75,10 @@ Android (`cd android`, JDK 17, `ANDROID_HOME` gesetzt):
 4. Online-Modell wählbar (andere Base-URL + Chat-Endpunkt; TranslateGemma-Prompt nur für lokales Modell).
 5. Bekannt: Satzteilung trennt Abkürzungen wie „z. B.“ falsch.
 6. **Android am echten Setup prüfen**: App auf dem Handy gegen LM Studio im WLAN (IP, Port, Token, Firewall) und mit einem echten
-   Buch (PDF/EPUB) ausprobieren; bisher nur Emulator gegen einen Fake-Server und JVM/Gerätetests. Offen: On-Device-Backend,
-   Vordergrunddienst für lange Läufe bei ausgeschaltetem Bildschirm, PDF-Lesezeichen.
+   Buch (PDF/EPUB) ausprobieren; bisher nur Emulator gegen einen Fake-Server und JVM/Gerätetests. Der Benutzer hatte beim ersten
+   langen Lauf einen Verbindungsfehler (Wortlaut unbekannt); vermutete Ursache: Handy gesperrt oder WLAN/PC im Ruhezustand.
+   Offen: **Vordergrunddienst** (Wake- und WLAN-Sperre) für Läufe bei ausgeschaltetem Bildschirm, On-Device-Backend, PDF-Lesezeichen,
+   Bilder aus PDF. Desktop-Programm hat (noch) keine Bilder, Restzeit-Schätzung, Fortsetzen und Verbindungswiederholung.
 
 ## Aufbau
 `translator/`: `documents.py` (lesen, Überschriften erkennen) · `chunking.py` · `pipeline.py` (ohne GUI) · `llm_client.py` ·

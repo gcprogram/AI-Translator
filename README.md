@@ -54,6 +54,16 @@ Firewall für den Port freigeben), in der App die IP des PCs, Port und API-Schl�
 PC unter `10.0.2.2` erreichbar. Das Modell läuft nicht auf dem Handy; `LlmBackend` ist die Schnittstelle, an der später ein
 On-Device-Modell (z. B. llama.cpp) angeschlossen werden kann.
 
+Für lange Bücher auf dem Handy:
+
+- **Bilder** aus EPUB und DOCX werden übernommen und stehen in der Übersetzung an derselben Absatzstelle (Platzhalter `[[Bild n]]`,
+  das Modell sieht sie nie; im Export als echte Bilder in DOCX, PDF und EPUB, TXT/MD lassen sie weg). Aus PDF werden noch keine Bilder übernommen.
+- **Restzeit-Schätzung** neben „Abschnitt x/y“, aus dem bisherigen Tempo hochgerechnet (nach Zeichen gewichtet).
+- **Verbindungsstörungen**: kurze Aussetzer werden automatisch wiederholt (3 s, 10 s, 30 s). Bricht es trotzdem ab, zeigt ein Kasten
+  den Fehler im Wortlaut, und „Fortsetzen“ macht beim ersten offenen Abschnitt weiter, auch nach einem Neustart der App.
+- Der Bildschirm bleibt an, solange übersetzt wird und die App vorn ist. Wird das Handy gesperrt oder die App verlassen, kann Android
+  die Verbindung unterbrechen; dann hilft „Fortsetzen“.
+
 Unterschiede zum Desktop-Programm: Die Übersetzung steht in Abschnittskarten (Original einblendbar, „Neu“ übersetzt einen Abschnitt
 neu) statt in zwei Textfeldern; die Sitzung wird automatisch gesichert und nach einem Neustart wiederhergestellt; das PDF hat keine
 Lesezeichen (Androids `PdfDocument` bietet das nicht).
@@ -62,8 +72,8 @@ Lesezeichen (Androids `PdfDocument` bietet das nicht).
 cd android
 ./gradlew assembleDebug            # APK: app/build/outputs/apk/debug/app-debug.apk
 ./gradlew installDebug             # auf ein angeschlossenes Gerät oder einen Emulator installieren
-./gradlew testDebugUnitTest        # 73 Tests auf der JVM, ohne Gerät
-./gradlew connectedDebugAndroidTest   # dieselben Tests + 7 Gerätetests auf Emulator/Gerät
+./gradlew testDebugUnitTest        # 115 Tests auf der JVM, ohne Gerät
+./gradlew connectedDebugAndroidTest   # dieselben Tests + 9 Gerätetests auf Emulator/Gerät
 ```
 
 Voraussetzungen: JDK 17 und Android SDK (`ANDROID_HOME`). Sind mehrere Geräte angeschlossen, vorher `ANDROID_SERIAL` setzen, sonst
