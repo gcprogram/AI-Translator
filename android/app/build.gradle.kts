@@ -5,9 +5,14 @@ plugins {
     id("org.jetbrains.kotlin.plugin.serialization")
 }
 
+// Das Modell auf dem Gerät braucht llama.cpp (scripts/fetch-llama-cpp.sh). Ohne den Quellordner, oder mit -PnoNative, entsteht eine
+// App ohne native Bibliothek: alles andere läuft, nur dieses Backend meldet dann, dass es fehlt.
+val buildNative = file("../third_party/llama.cpp/CMakeLists.txt").exists() && !project.hasProperty("noNative")
+
 android {
     namespace = "app.aitranslator"
     compileSdk = 35
+    ndkVersion = "28.2.13676358"
 
     defaultConfig {
         applicationId = "app.aitranslator"
@@ -16,6 +21,18 @@ android {
         versionCode = 1
         versionName = "0.1.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+        ndk {
+            // Für schnelle Entwicklungsläufe nur die Handy-Architektur bauen: ./gradlew assembleDebug -Pabis=arm64-v8a
+            abiFilters += ((project.findProperty("abis") as String?) ?: "arm64-v8a,x86_64").split(',')
+        }
+    }
+    if (buildNative) {
+        externalNativeBuild {
+            cmake {
+                path = file("src/main/cpp/CMakeLists.txt")
+                version = "3.22.1"
+            }
+        }
     }
 
     buildTypes {

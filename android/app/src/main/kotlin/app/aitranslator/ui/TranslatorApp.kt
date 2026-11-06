@@ -83,7 +83,7 @@ private enum class Screen { MAIN, SETTINGS, GLOSSARY }
 fun TranslatorApp(vm: MainViewModel) {
     val state by vm.state.collectAsStateWithLifecycle()
     // Erststart ohne Einrichtung: gleich in die Einstellungen (rememberSaveable: nur beim ersten Aufbau, nicht nach Drehen)
-    var screen by rememberSaveable { mutableStateOf(if (state.config.model.isBlank()) Screen.SETTINGS else Screen.MAIN) }
+    var screen by rememberSaveable { mutableStateOf(if (!state.config.isConfigured) Screen.SETTINGS else Screen.MAIN) }
     val snackbar = remember { SnackbarHostState() }
     BackHandler(enabled = screen != Screen.MAIN) { screen = Screen.MAIN }
 
@@ -183,7 +183,7 @@ private fun MainScreen(
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Button(
                     // Ohne Modell käme nach der Dateiwahl nur ein Hinweis: lieber vorher zur Einrichtung führen
-                    onClick = { if (state.config.model.isBlank()) showSetup = true else openLauncher.launch(arrayOf("*/*")) },
+                    onClick = { if (!state.config.isConfigured) showSetup = true else openLauncher.launch(arrayOf("*/*")) },
                     enabled = !state.running, modifier = Modifier.weight(1f),
                 ) {
                     Text("Datei übersetzen…")

@@ -49,10 +49,20 @@ Im Ordner `android/` liegt eine native Android-App (Kotlin, Jetpack Compose) mit
 Glossar (mehrere benannte Glossare), Streaming, Überschriften-Erkennung, Bearbeiten, Suchen/Ersetzen und Export nach
 TXT, MD, DOCX, PDF und EPUB. Die Kernlogik ist aus dem Python-Programm nach Kotlin portiert (`android/app/src/main/kotlin/app/aitranslator/core`).
 
-Das Handy ist der **Client** für LM Studio auf dem PC: in LM Studio „Im lokalen Netzwerk bereitstellen“ aktivieren (und ggf. die
+Es gibt zwei Wege zu übersetzen (Einstellungen → „Wo soll übersetzt werden?“):
+
+- **LM Studio im Netzwerk**: schnell, braucht den PC.
+- **Modell auf dem Gerät**: offline, TranslateGemma läuft mit llama.cpp direkt auf dem Handy. Die `.gguf`-Datei (z. B. 
+  `google.translategemma-4b-it.Q4_K_S.gguf`, 2,4 GB) wird im Dateiwähler gewählt und **nicht kopiert**, sondern direkt gelesen. Gemessen auf
+  einem Galaxy S21: Prompt 17 Token/s, Antwort 3,9 Token/s, also grob 5 Minuten je 3500-Zeichen-Abschnitt (ein Buch mit 50 Abschnitten
+  braucht Stunden; die Restzeit-Schätzung zeigt es). Das Modell braucht rund 3 GB Arbeitsspeicher und wird nach jedem Lauf wieder freigegeben.
+  Andere Apps vorher zu schließen hilft, sonst beendet Android die App bei Speichermangel (dann „Fortsetzen“).
+  Gebaut wird llama.cpp nur, wenn der Quellordner da ist: einmal `sh scripts/fetch-llama-cpp.sh` im Ordner `android/` ausführen
+  (lädt die feste Version b12164 nach `android/third_party`, nicht im Repo). Ohne den Ordner, oder mit `-PnoNative`, baut die App ohne dieses Backend.
+
+Beim Netzwerk-Backend ist das Handy der **Client** für LM Studio auf dem PC: in LM Studio „Im lokalen Netzwerk bereitstellen“ aktivieren (und ggf. die
 Firewall für den Port freigeben), in der App die IP des PCs, Port und API-Schlüssel eintragen, „Modelle laden“. Im Emulator ist der
-PC unter `10.0.2.2` erreichbar. Das Modell läuft nicht auf dem Handy; `LlmBackend` ist die Schnittstelle, an der später ein
-On-Device-Modell (z. B. llama.cpp) angeschlossen werden kann.
+PC unter `10.0.2.2` erreichbar. `LlmBackend` ist die Schnittstelle, hinter der beide Backends stehen.
 
 Für lange Bücher auf dem Handy:
 
@@ -75,8 +85,8 @@ Lesezeichen (Androids `PdfDocument` bietet das nicht).
 cd android
 ./gradlew assembleDebug            # APK: app/build/outputs/apk/debug/app-debug.apk
 ./gradlew installDebug             # auf ein angeschlossenes Gerät oder einen Emulator installieren
-./gradlew testDebugUnitTest        # 115 Tests auf der JVM, ohne Gerät
-./gradlew connectedDebugAndroidTest   # dieselben Tests + 9 Gerätetests auf Emulator/Gerät
+./gradlew testDebugUnitTest        # 130 Tests auf der JVM, ohne Gerät
+./gradlew connectedDebugAndroidTest   # dieselben Tests + 11 Gerätetests auf Emulator/Gerät
 ```
 
 Voraussetzungen: JDK 17 und Android SDK (`ANDROID_HOME`). Sind mehrere Geräte angeschlossen, vorher `ANDROID_SERIAL` setzen, sonst
@@ -85,5 +95,5 @@ installiert Gradle auf alle.
 ## Roadmap
 
 - Token-Budget statt Zeichenzahl für die Abschnittsgröße.
-- Android: Modell auf dem Gerät als zweites Backend; Vordergrunddienst, damit lange Übersetzungen mit ausgeschaltetem Bildschirm weiterlaufen.
+- Android: PDF-Lesezeichen und Bilder aus PDF; Desktop-Programm auf den Stand der App bringen (Bilder, Restzeit, Fortsetzen, Wiederholung).
 - Alternativ Online-Modelle (OpenAI-kompatibler Endpunkt) wählbar.

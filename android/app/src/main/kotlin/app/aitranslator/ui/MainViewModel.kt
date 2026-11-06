@@ -22,6 +22,8 @@ import app.aitranslator.core.TranslationPipeline
 import app.aitranslator.core.buildContext
 import app.aitranslator.core.parseGlossary
 import app.aitranslator.core.splitIntoChunks
+import app.aitranslator.ondevice.OnDeviceBackend
+import app.aitranslator.ondevice.OnDeviceEngine
 import app.aitranslator.data.ChunkData
 import app.aitranslator.data.ConfigStore
 import app.aitranslator.data.GlossaryStore
@@ -151,7 +153,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun translateDocument(uri: Uri) {
         if (_state.value.running) return
         val config = _state.value.config
-        if (config.model.isBlank()) {
+        if (!config.isConfigured) {
             _state.update { it.copy(message = "Bitte zuerst in den Einstellungen ein Modell wählen.") }
             return
         }
@@ -164,7 +166,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     /** Neue Pipeline; bei einer Verbindungsstörung wird der halb angezeigte Text des Abschnitts zurückgesetzt. */
     private fun newPipeline(config: Config) = TranslationPipeline(
-        LmStudioBackend(config.baseUrl, config.apiKey), config,
+        if (config.isOnDevice) OnDeviceBackend(getApplication(), Uri.parse(config.deviceModelUri))
+        else LmStudioBackend(config.baseUrl, config.apiKey),
+        config,
         onRetry = { attempt, reason ->
             _state.update { s ->
                 s.copy(
@@ -195,7 +199,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             _state.update { it.copy(running = false, glossaryReview = null) }
             reviewReply = null
             TranslationService.stop(getApplication())
-            withContext(NonCancellable) { saveNow() }
+            withContext(NonCancellable) {
+                saveNow()
+                if (_state.value.config.isOnDevice) OnDeviceEngine.releaseWhenIdle() // Arbeitsspeicher zurückgeben
+            }
         }
     }
 
@@ -204,7 +211,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val s = _state.value
         if (s.running || s.pending.isEmpty()) return
         val config = s.config
-        if (config.model.isBlank()) {
+        if (!config.isConfigured) {
             _state.update { it.copy(message = "Bitte zuerst in den Einstellungen ein Modell wählen.") }
             return
         }
@@ -312,7 +319,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val s = _state.value
         val config = s.config
         val section = s.sections.firstOrNull { it.index == index } ?: return
-        if (s.running || config.model.isBlank()) return
+        if (s.running || !config.isConfigured) return
         val previous = s.sections.firstOrNull { it.index == index - 1 }
         val context = if (config.useContext && previous != null) buildContext(previous.source, previous.translation) else null
         job = viewModelScope.launch {
@@ -339,7 +346,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             } finally {
                 _state.update { it.copy(running = false) }
                 TranslationService.stop(getApplication())
-                withContext(NonCancellable) { saveNow() }
+                withContext(NonCancellable) {
+                    saveNow()
+                    if (_state.value.config.isOnDevice) OnDeviceEngine.releaseWhenIdle()
+                }
             }
         }
     }

@@ -149,3 +149,28 @@ class StoresTest {
         assertNotNull(Config())
     }
 }
+
+/** Prüft die JNI-Brücke zu llama.cpp, ohne ein Modell zu brauchen: Bibliothek lädt, Fehler kommen als klare Meldung. */
+@RunWith(AndroidJUnit4::class)
+class NativeBridgeTest {
+    @Test
+    fun invalidDescriptorIsRejectedWithClearMessage() {
+        val failure = org.junit.Assert.assertThrows(IllegalStateException::class.java) {
+            app.aitranslator.ondevice.NativeLlama.load(-1, 512, 2)
+        }
+        assertTrue(failure.message, "lesen" in failure.message.orEmpty())
+    }
+
+    @Test
+    fun fileThatIsNoGgufIsRejectedWithClearMessage() {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val junk = File(context.cacheDir, "kein-modell.gguf").apply { writeBytes(ByteArray(4096) { (it * 7).toByte() }) }
+        android.os.ParcelFileDescriptor.open(junk, android.os.ParcelFileDescriptor.MODE_READ_ONLY).use { descriptor ->
+            val failure = org.junit.Assert.assertThrows(IllegalStateException::class.java) {
+                app.aitranslator.ondevice.NativeLlama.load(descriptor.fd, 512, 2)
+            }
+            assertTrue(failure.message, "geladen" in failure.message.orEmpty())
+        }
+        junk.delete()
+    }
+}

@@ -43,7 +43,16 @@ Der Chat-Teil lebt jetzt in `gcprogram/AI-Chat-MCP`.
   in `filesDir/images` (`ImageStore`), nicht im Speicher. Gelesen aus EPUB (img/svg-image in Dokumentreihenfolge) und DOCX (Beziehungen),
   geschrieben in DOCX/EPUB/PDF; nicht aus PDF. Fortsetzen: `SessionData.pending` hält die noch offenen Abschnitte; `LlmException.transient`
   steuert die automatische Wiederholung (`CONNECTION_RETRY_DELAYS_MS`). Restzeit: `core/Eta.kt`.
-  Stolpersteine, die schon aufgetreten sind: (0) Textdateien mit Windows-Zeilenenden (`\r\n`) erzeugten keine Absätze (Absatzerkennung
+  **Modell auf dem Gerät** (`ondevice/`, `app/src/main/cpp`): llama.cpp (fest b12164, `scripts/fetch-llama-cpp.sh` lädt es nach
+  `android/third_party`, gitignored) als JNI-Bibliothek. `OnDeviceBackend` implementiert `LlmBackend.complete()` mit dem Roh-Prompt von
+  TranslateGemma (`chat()` ist nicht unterstützt). Das Modell wird über einen Dateideskriptor geladen (`llama_model_load_from_file_ptr`
+  mit `dup`/`fdopen`): `/proc/self/fd/N` zu öffnen verbietet Android für Dateien aus dem Dateiwähler. Keine Kopie (Handy war zu 95 % voll).
+  Kontext 4096 Token (KV-Zwischenspeicher kostet Arbeitsspeicher), 4 Threads, nur CPU, `armv8.2-a+dotprod`. UTF-8-Grenzen und
+  Stop-Wörter stehen in Kotlin (`Text.kt`, testbar). `OnDeviceEngine.releaseWhenIdle()` gibt das Modell nach jedem Lauf frei:
+  sonst hielt die App ~3 GB und `lmkd` beendete sie im Hintergrund. Gemessen (Galaxy S21): 17 Token/s Prompt, 3,9 Token/s Antwort.
+  Gradle baut die native Bibliothek nur, wenn `third_party/llama.cpp` existiert und `-PnoNative` fehlt; `-Pabis=arm64-v8a` baut nur ARM.
+  Stolpersteine, die schon aufgetreten sind: (00) llama.cpp ändert die C-API oft (z. B. `use_mmap` wurde zu `load_mode`): beim Wechsel der
+  Version `llama_jni.cpp` gegen `include/llama.h` prüfen. (0) Textdateien mit Windows-Zeilenenden (`\r\n`) erzeugten keine Absätze (Absatzerkennung
   verlangt `\n\n`): `readText` normalisiert jetzt, in Kotlin und Python (`_read_text`). (1) Androids Regex (ICU) kennt keine Flags wie `(?U)` und definiert `\s`/`\b` anders als die
   JVM; deshalb `WS = [\s\p{Z}]` und explizite Klassen, nie `(?U)`. (2) Testnamen mit Leerzeichen (Backticks) lassen sich bei minSdk 26
   nicht dexen: camelCase. (3) PDFBox-Android und `PdfDocument` laufen nur auf einem Gerät; die JVM-Tests werden deshalb zusätzlich als
@@ -61,8 +70,8 @@ python main.py
 ```
 Android (`cd android`, JDK 17, `ANDROID_HOME` gesetzt):
 ```bash
-./gradlew testDebugUnitTest            # 115 JVM-Tests
-./gradlew connectedDebugAndroidTest    # 124 Tests auf Emulator/Gerät (zuvor ANDROID_SERIAL setzen); AVD z. B. aitranslator_test (API 36)
+./gradlew testDebugUnitTest            # 130 JVM-Tests
+./gradlew connectedDebugAndroidTest    # 141 Tests auf Emulator/Gerät (zuvor ANDROID_SERIAL setzen); AVD z. B. aitranslator_test (API 36)
 ```
 
 ## Offene Aufgaben (Reihenfolge)
@@ -81,8 +90,10 @@ Android (`cd android`, JDK 17, `ANDROID_HOME` gesetzt):
    Anwendung (`TranslatorApplication` ist `ViewModelStoreOwner`), damit der Lauf das Schließen der Activity übersteht. Auf dem Emulator geprüft
    (Zurück-Taste, Bildschirm aus: Lauf vollständig, Sperren danach frei); **echter Doze-Ruhezustand auf dem Handy noch nicht geprüft**
    (Knopf „Akku-Optimierung ausschalten“ in den Einstellungen als Rückfall). Android 15 begrenzt dataSync-Dienste auf rund 6 Stunden je Tag.
-   Offen: On-Device-Backend, PDF-Lesezeichen, Bilder aus PDF. Desktop-Programm hat (noch) keine Bilder, Restzeit-Schätzung,
-   Fortsetzen und Verbindungswiederholung.
+   On-Device-Backend ist gebaut und auf dem Galaxy S21 mit dem echten Modell geprüft (Abschnitt übersetzt, Speicher danach frei).
+   Offen: längerer Lauf auf dem Handy (viele Abschnitte, Hitze/Akku), PDF-Lesezeichen (Android: nachträglich mit PDFBox in das
+   `PdfDocument`-Ergebnis schreiben), Bilder aus PDF (PDFBox `Do`-Operator + Position). Desktop-Programm hat (noch) keine Bilder,
+   Restzeit-Schätzung, Fortsetzen und Verbindungswiederholung.
 
 ## Aufbau
 `translator/`: `documents.py` (lesen, Überschriften erkennen) · `chunking.py` · `pipeline.py` (ohne GUI) · `llm_client.py` ·

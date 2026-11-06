@@ -24,6 +24,8 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.MenuAnchorType
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.RadioButton
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
@@ -44,8 +46,11 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
+import app.aitranslator.core.BACKEND_DEVICE
+import app.aitranslator.core.BACKEND_LMSTUDIO
 import app.aitranslator.core.MAX_CHUNK_CHARS
 import app.aitranslator.core.MIN_CHUNK_CHARS
+import app.aitranslator.ondevice.OnDeviceBackend
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -60,6 +65,18 @@ fun SettingsScreen(state: UiState, vm: MainViewModel, snackbar: SnackbarHostStat
     var useContext by remember { mutableStateOf(config.useContext) }
     var prompt by remember { mutableStateOf(config.translationPrompt) }
     var modelMenu by remember { mutableStateOf(false) }
+    var backend by remember { mutableStateOf(config.backend) }
+    var deviceUri by remember { mutableStateOf(config.deviceModelUri) }
+    var deviceName by remember { mutableStateOf(config.deviceModelName) }
+    val context = LocalContext.current
+    val modelPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) {
+            // Dauerhaften Lesezugriff merken: die Datei wird nicht kopiert, sondern bei jedem Start direkt gelesen
+            runCatching { context.contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION) }
+            deviceUri = uri.toString()
+            deviceName = OnDeviceBackend.displayName(context, uri)
+        }
+    }
 
     // "Modelle laden" wählt bei leerem Feld das erste Modell; die lokale Eingabe muss das übernehmen
     LaunchedEffect(config.model) { if (model.isBlank()) model = config.model }
@@ -70,8 +87,13 @@ fun SettingsScreen(state: UiState, vm: MainViewModel, snackbar: SnackbarHostStat
             vm.showMessage("Teilstücklänge muss eine ganze Zahl sein.")
             return
         }
+        if (backend == BACKEND_DEVICE && deviceUri.isBlank()) {
+            vm.showMessage("Bitte eine Modelldatei (.gguf) wählen.")
+            return
+        }
         vm.saveConfig(
             vm.state.value.config.copy(
+                backend = backend, deviceModelUri = deviceUri, deviceModelName = deviceName,
                 ip = ip, port = port, apiKey = apiKey, model = model.trim(), maxChunkChars = chars,
                 stream = stream, useContext = useContext, translationPrompt = prompt,
             ),
@@ -92,7 +114,10 @@ fun SettingsScreen(state: UiState, vm: MainViewModel, snackbar: SnackbarHostStat
             Modifier.fillMaxSize().padding(padding).padding(horizontal = 16.dp).verticalScroll(rememberScrollState()),
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
-            Text("Backend: LM Studio im Netzwerk (HTTP, OpenAI-kompatibel)", style = MaterialTheme.typography.labelLarge)
+            Text("Wo soll übersetzt werden?", style = MaterialTheme.typography.labelLarge)
+            BackendChoice("LM Studio im Netzwerk (schnell, braucht den PC)", backend == BACKEND_LMSTUDIO) { backend = BACKEND_LMSTUDIO }
+            BackendChoice("Modell auf dem Gerät (offline, langsamer)", backend == BACKEND_DEVICE) { backend = BACKEND_DEVICE }
+            if (backend == BACKEND_LMSTUDIO) {
             OutlinedTextField(ip, { ip = it }, label = { Text("IP-Adresse des PCs") }, singleLine = true, modifier = Modifier.fillMaxWidth())
             OutlinedTextField(
                 port, { port = it }, label = { Text("Port") }, singleLine = true, modifier = Modifier.fillMaxWidth(),
@@ -125,6 +150,25 @@ fun SettingsScreen(state: UiState, vm: MainViewModel, snackbar: SnackbarHostStat
             }
             OutlinedButton(onClick = { vm.loadModels(ip, port, apiKey) }, enabled = !state.modelsLoading) {
                 Text(if (state.modelsLoading) "Lade…" else "Modelle laden")
+            }
+            } else {
+                Text(
+                    "TranslateGemma als GGUF-Datei (z. B. google.translategemma-4b-it.Q4_K_S.gguf, etwa 2,4 GB) wählen. Die Datei wird " +
+                        "nicht kopiert, sondern direkt von ihrem Ort gelesen. Das Modell braucht rund 3 GB freien Arbeitsspeicher, " +
+                        "und die Übersetzung dauert auf dem Handy deutlich länger als am PC.",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                OutlinedButton(onClick = { modelPicker.launch(arrayOf("*/*")) }) { Text("Modelldatei wählen…") }
+                Text(
+                    if (deviceName.isBlank()) "Noch keine Datei gewählt." else deviceName,
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+                if (deviceName.isNotBlank() && "translategemma" !in deviceName.lowercase()) {
+                    Text(
+                        "Der Name enthält nicht „translategemma“: auf dem Gerät werden nur TranslateGemma-Modelle unterstützt.",
+                        style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error,
+                    )
+                }
             }
             OutlinedTextField(
                 chunk, { chunk = it }, label = { Text("Teilstücklänge in Zeichen ($MIN_CHUNK_CHARS–$MAX_CHUNK_CHARS)") }, singleLine = true,
@@ -164,6 +208,14 @@ private fun BatteryOptimizationRow() {
         },
         enabled = !ignoring,
     ) { Text(if (ignoring) "Akku-Optimierung ist aus" else "Akku-Optimierung ausschalten") }
+}
+
+@Composable
+private fun BackendChoice(label: String, selected: Boolean, onSelect: () -> Unit) {
+    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+        RadioButton(selected = selected, onClick = onSelect)
+        TextButton(onClick = onSelect) { Text(label) }
+    }
 }
 
 @Composable

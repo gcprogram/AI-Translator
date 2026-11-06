@@ -92,6 +92,21 @@ class ConfigAndLanguageTest {
     }
 
     @Test
+    fun backendDecidesWhichModelCountsAndWhetherSetupIsComplete() {
+        val lmStudio = Config(model = "google.translategemma-4b-it")
+        assertTrue(lmStudio.isConfigured && lmStudio.isTranslateGemma && !lmStudio.isOnDevice)
+        assertFalse(Config().isConfigured) // nichts gewählt
+
+        val device = Config(backend = BACKEND_DEVICE, model = "qwen", deviceModelName = "google.translategemma-4b-it.Q4_K_S.gguf")
+        assertFalse(device.isConfigured) // Datei fehlt noch
+        val ready = device.copy(deviceModelUri = "content://x/model")
+        assertTrue(ready.isConfigured && ready.isOnDevice)
+        assertTrue(ready.isTranslateGemma) // zählt der Name der Datei, nicht das LM-Studio-Modell 'qwen'
+        assertFalse(ready.copy(deviceModelName = "irgendwas.gguf").isTranslateGemma)
+        assertEquals(BACKEND_LMSTUDIO, Config(backend = "unsinn").sanitized().backend)
+    }
+
+    @Test
     fun translategemmaIsDetectedCaseInsensitive() {
         assertTrue(Config(model = "google.TranslateGemma-4b-it").isTranslateGemma)
         assertFalse(Config(model = "qwen").isTranslateGemma)

@@ -13,3 +13,5 @@ android/local.properties
 android/captures/
 android/.kotlin/
 *.iml
+android/third_party/
+android/app/.cxx/
