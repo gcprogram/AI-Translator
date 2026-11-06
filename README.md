@@ -61,8 +61,11 @@ Für lange Bücher auf dem Handy:
 - **Restzeit-Schätzung** neben „Abschnitt x/y“, aus dem bisherigen Tempo hochgerechnet (nach Zeichen gewichtet).
 - **Verbindungsstörungen**: kurze Aussetzer werden automatisch wiederholt (3 s, 10 s, 30 s). Bricht es trotzdem ab, zeigt ein Kasten
   den Fehler im Wortlaut, und „Fortsetzen“ macht beim ersten offenen Abschnitt weiter, auch nach einem Neustart der App.
-- Der Bildschirm bleibt an, solange übersetzt wird und die App vorn ist. Wird das Handy gesperrt oder die App verlassen, kann Android
-  die Verbindung unterbrechen; dann hilft „Fortsetzen“.
+- **Vordergrunddienst**: Während einer Übersetzung läuft ein Dienst mit Benachrichtigung („AI-Translator“, Fortschritt) sowie CPU- und
+  WLAN-Sperre. Die Übersetzung läuft damit bei gesperrtem Bildschirm, nach dem Wechsel in eine andere App und auch dann weiter, wenn die
+  Oberfläche geschlossen wird. Beim ersten Start fragt Android nach der Erlaubnis für Benachrichtigungen (ohne sie läuft es trotzdem).
+  Schränkt ein Handy Apps im Ruhezustand dennoch ein, hilft in den Einstellungen „Akku-Optimierung ausschalten“. Solange die App vorn ist,
+  bleibt der Bildschirm an. Bricht die Verbindung trotzdem ab, hilft „Fortsetzen“.
 
 Unterschiede zum Desktop-Programm: Die Übersetzung steht in Abschnittskarten (Original einblendbar, „Neu“ übersetzt einen Abschnitt
 neu) statt in zwei Textfeldern; die Sitzung wird automatisch gesichert und nach einem Neustart wiederhergestellt; das PDF hat keine

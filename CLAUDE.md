@@ -77,8 +77,12 @@ Android (`cd android`, JDK 17, `ANDROID_HOME` gesetzt):
 6. **Android am echten Setup prüfen**: App auf dem Handy gegen LM Studio im WLAN (IP, Port, Token, Firewall) und mit einem echten
    Buch (PDF/EPUB) ausprobieren; bisher nur Emulator gegen einen Fake-Server und JVM/Gerätetests. Der Benutzer hatte beim ersten
    langen Lauf einen Verbindungsfehler (Wortlaut unbekannt); vermutete Ursache: Handy gesperrt oder WLAN/PC im Ruhezustand.
-   Offen: **Vordergrunddienst** (Wake- und WLAN-Sperre) für Läufe bei ausgeschaltetem Bildschirm, On-Device-Backend, PDF-Lesezeichen,
-   Bilder aus PDF. Desktop-Programm hat (noch) keine Bilder, Restzeit-Schätzung, Fortsetzen und Verbindungswiederholung.
+   Vordergrunddienst (`TranslationService`: Benachrichtigung, Wake- und WLAN-Sperre, Typ dataSync) ist gebaut; das ViewModel gehört der
+   Anwendung (`TranslatorApplication` ist `ViewModelStoreOwner`), damit der Lauf das Schließen der Activity übersteht. Auf dem Emulator geprüft
+   (Zurück-Taste, Bildschirm aus: Lauf vollständig, Sperren danach frei); **echter Doze-Ruhezustand auf dem Handy noch nicht geprüft**
+   (Knopf „Akku-Optimierung ausschalten“ in den Einstellungen als Rückfall). Android 15 begrenzt dataSync-Dienste auf rund 6 Stunden je Tag.
+   Offen: On-Device-Backend, PDF-Lesezeichen, Bilder aus PDF. Desktop-Programm hat (noch) keine Bilder, Restzeit-Schätzung,
+   Fortsetzen und Verbindungswiederholung.
 
 ## Aufbau
 `translator/`: `documents.py` (lesen, Überschriften erkennen) · `chunking.py` · `pipeline.py` (ohne GUI) · `llm_client.py` ·

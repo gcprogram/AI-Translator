@@ -1,6 +1,9 @@
 package app.aitranslator.ui
 
+import android.Manifest
+import android.content.pm.PackageManager
 import android.net.Uri
+import android.os.Build
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -62,9 +65,11 @@ import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import app.aitranslator.core.Languages
 import app.aitranslator.core.formatGlossary
@@ -81,6 +86,15 @@ fun TranslatorApp(vm: MainViewModel) {
     var screen by rememberSaveable { mutableStateOf(if (state.config.model.isBlank()) Screen.SETTINGS else Screen.MAIN) }
     val snackbar = remember { SnackbarHostState() }
     BackHandler(enabled = screen != Screen.MAIN) { screen = Screen.MAIN }
+
+    // Ab Android 13 braucht die Benachrichtigung des Vordergrunddienstes eine Erlaubnis; ohne läuft die Übersetzung trotzdem
+    val context = LocalContext.current
+    val notificationPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { }
+    LaunchedEffect(Unit) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+        ) notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
+    }
 
     LaunchedEffect(state.message) {
         state.message?.let {

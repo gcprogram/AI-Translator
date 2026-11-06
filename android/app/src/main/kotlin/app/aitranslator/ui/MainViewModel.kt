@@ -9,6 +9,7 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import app.aitranslator.core.Chunk
+import app.aitranslator.TranslationService
 import app.aitranslator.core.CONNECTION_RETRY_DELAYS_MS
 import app.aitranslator.core.Config
 import app.aitranslator.core.Context
@@ -177,6 +178,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     /** Führt einen Übersetzungslauf aus und sorgt für Statusanzeige, Fehlertext, Sicherung und Aufräumen. */
     private suspend fun guarded(startStatus: String, block: suspend () -> Unit) {
         _state.update { it.copy(running = true, status = startStatus, error = null) }
+        TranslationService.start(getApplication()) // Vordergrunddienst: läuft auch bei gesperrtem Bildschirm weiter
         try {
             block()
             _state.update { it.copy(status = "Übersetzung abgeschlossen.") }
@@ -192,6 +194,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         } finally {
             _state.update { it.copy(running = false, glossaryReview = null) }
             reviewReply = null
+            TranslationService.stop(getApplication())
             withContext(NonCancellable) { saveNow() }
         }
     }
@@ -239,6 +242,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     dirty = true,
                 )
             }
+            _state.value.let { TranslationService.update(getApplication(), it.status, (it.progress * 100).toInt()) }
             scheduleSave()
         }
     }
@@ -316,6 +320,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 st.copy(running = true, status = "Abschnitt $index wird neu übersetzt…",
                     sections = st.sections.map { if (it.index == index) it.copy(translation = "", warnings = emptyList(), live = true) else it })
             }
+            TranslationService.start(getApplication())
             try {
                 val pipeline = newPipeline(config)
                 val glossary = glossaries.load(config.glossaryName)
@@ -333,6 +338,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 _state.update { it.copy(message = e.message ?: e.toString()) }
             } finally {
                 _state.update { it.copy(running = false) }
+                TranslationService.stop(getApplication())
                 withContext(NonCancellable) { saveNow() }
             }
         }

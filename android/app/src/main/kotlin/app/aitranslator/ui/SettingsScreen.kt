@@ -1,5 +1,11 @@
 package app.aitranslator.ui
 
+import android.content.Intent
+import android.net.Uri
+import android.os.PowerManager
+import android.provider.Settings
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -28,11 +34,13 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
@@ -124,6 +132,7 @@ fun SettingsScreen(state: UiState, vm: MainViewModel, snackbar: SnackbarHostStat
             )
             SwitchRow("Übersetzung beim Entstehen anzeigen", stream) { stream = it }
             SwitchRow("Vorgängerabschnitt als Kontext mitsenden", useContext) { useContext = it }
+            BatteryOptimizationRow()
             OutlinedTextField(
                 prompt, { prompt = it }, label = { Text("Prompt (nicht TranslateGemma)") }, minLines = 3, maxLines = 6,
                 modifier = Modifier.fillMaxWidth(),
@@ -131,6 +140,30 @@ fun SettingsScreen(state: UiState, vm: MainViewModel, snackbar: SnackbarHostStat
             Button(onClick = ::save, modifier = Modifier.fillMaxWidth()) { Text("Speichern") }
         }
     }
+}
+
+/**
+ * Der Vordergrunddienst hält eine laufende Übersetzung bei gesperrtem Bildschirm am Leben. Manche Handys schränken Apps im
+ * Ruhezustand trotzdem ein; dann hilft es, die Akku-Optimierung für diese App auszuschalten.
+ */
+@Composable
+private fun BatteryOptimizationRow() {
+    val context = LocalContext.current
+    var refresh by remember { mutableIntStateOf(0) }
+    val ignoring = remember(refresh) {
+        context.getSystemService(PowerManager::class.java).isIgnoringBatteryOptimizations(context.packageName)
+    }
+    val launcher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { refresh++ }
+    Text(
+        "Bricht die Übersetzung bei gesperrtem Handy trotzdem ab, hilft es, die Akku-Optimierung für diese App auszuschalten.",
+        style = MaterialTheme.typography.bodySmall,
+    )
+    OutlinedButton(
+        onClick = {
+            launcher.launch(Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:${context.packageName}")))
+        },
+        enabled = !ignoring,
+    ) { Text(if (ignoring) "Akku-Optimierung ist aus" else "Akku-Optimierung ausschalten") }
 }
 
 @Composable
