@@ -27,6 +27,11 @@ Buch oder Reihe). Wirkt bei allen Modellen; fehlt ein Begriff im Ergebnis, ersch
 „CHAPTER ONE“ …) und beim Export zu echten Überschriften: Word-Formatvorlagen, PDF-Lesezeichen, EPUB-Kapitel mit Inhaltsverzeichnis.
 Absätze, *kursiv* und **fett** bleiben erhalten (TXT ohne Auszeichnung, MD mit).
 
+**Lange Bücher (Desktop)**: Bilder aus EPUB, DOCX und PDF stehen als Platzhalter `[[Bild n]]` an ihrer Absatzstelle im Text (das Modell
+sieht sie nie) und kommen im Export als echte Bilder in DOCX, PDF und EPUB zurück (TXT/MD lassen sie weg; nicht einbettbare Formate wie
+SVG werden übersprungen). Neben „Abschnitt x/y“ steht die Restzeit-Schätzung. Kurze Verbindungsaussetzer werden automatisch wiederholt
+(3 s, 10 s, 30 s); nach Abbruch oder Fehler setzt „Fortsetzen“ beim ersten offenen Abschnitt fort (der angefangene wird neu übersetzt).
+
 ## Aufbau
 
 | Modul | Aufgabe |
@@ -37,7 +42,9 @@ Absätze, *kursiv* und **fett** bleiben erhalten (TXT ohne Auszeichnung, MD mit)
 | `translator/llm_client.py` | HTTP-Client; Fehler als Exception, `finish_reason` wird ausgewertet |
 | `translator/prompts.py` | TranslateGemma-Prompt (Template nachgebildet) und Prompts für andere Modelle |
 | `translator/glossary.py` | Glossar lesen/speichern, passende Begriffe finden, Einhaltung prüfen |
-| `translator/exporters.py` | Export nach TXT, MD, DOCX, PDF, EPUB (Überschriften, Absätze, Kapitel) |
+| `translator/images.py` | Bild-Platzhalter `[[Bild n]]`: herausnehmen, an dieselbe Stelle zurücksetzen, Bilder sammeln |
+| `translator/eta.py` | Restzeit-Schätzung (nach Zeichen gewichtet) |
+| `translator/exporters.py` | Export nach TXT, MD, DOCX, PDF, EPUB (Überschriften, Absätze, Kapitel, Bilder) |
 | `translator/gui.py` | Tkinter-GUI, Worker-Thread über Queue entkoppelt |
 | `translator/dialogs.py` | Glossar-Editor, Suchen/Ersetzen |
 
@@ -94,5 +101,5 @@ installiert Gradle auf alle.
 ## Roadmap
 
 - Token-Budget statt Zeichenzahl für die Abschnittsgröße.
-- Android: PDF-Lesezeichen und Bilder aus PDF; Desktop-Programm auf den Stand der App bringen (Bilder, Restzeit, Fortsetzen, Wiederholung).
+- Desktop: Bilder-Vorschau im Textfeld (bisher nur Platzhalter), Sitzung sichern und nach einem Neustart fortsetzen (wie in der App).
 - Alternativ Online-Modelle (OpenAI-kompatibler Endpunkt) wählbar.

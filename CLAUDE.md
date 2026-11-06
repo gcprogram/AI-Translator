@@ -65,7 +65,7 @@ Der Chat-Teil lebt jetzt in `gcprogram/AI-Chat-MCP`.
 ## Tests / Start
 ```bash
 python -m venv .venv && .venv\Scripts\activate && pip install -r requirements.txt
-set PYTHONPATH=. && python -m unittest discover -s tests      # 56 Tests, brauchen keinen LM-Studio-Server
+set PYTHONPATH=. && python -m unittest discover -s tests      # 81 Tests, brauchen keinen LM-Studio-Server
 python main.py
 ```
 Android (`cd android`, JDK 17, `ANDROID_HOME` gesetzt):
@@ -91,10 +91,14 @@ Android (`cd android`, JDK 17, `ANDROID_HOME` gesetzt):
    (Zurück-Taste, Bildschirm aus: Lauf vollständig, Sperren danach frei); **echter Doze-Ruhezustand auf dem Handy noch nicht geprüft**
    (Knopf „Akku-Optimierung ausschalten“ in den Einstellungen als Rückfall). Android 15 begrenzt dataSync-Dienste auf rund 6 Stunden je Tag.
    On-Device-Backend ist gebaut und auf dem Galaxy S21 mit dem echten Modell geprüft (Abschnitt übersetzt, Speicher danach frei).
-   Offen: längerer Lauf auf dem Handy (viele Abschnitte, Hitze/Akku). Desktop-Programm hat (noch) keine Bilder, Restzeit-Schätzung,
-   Fortsetzen und Verbindungswiederholung.
+   Offen: längerer Lauf auf dem Handy (viele Abschnitte, Hitze/Akku).
+7. **Desktop auf Stand der App** (umgesetzt, nur mit Fake-Client und Tk-Skript geprüft, nicht an einem echten Buch): `translator/images.py`
+   (Platzhalter `[[Bild n]]`, `ImageCollector`), `eta.py`, `exporters.save_document(..., images=lookup)`, `read_document(path, images)`,
+   `LLMError.transient` + `TranslationPipeline(on_retry=...)` (Wiederholung 3/10/30 s), `translate(..., initial_context=...)`; GUI: Restzeit im Status,
+   Knopf „Fortsetzen“ (offene Abschnitte im Speicher, kein Neustart-Fortsetzen wie in der App, Bilder nur als Platzhalter sichtbar).
+   Tests: `tests/test_images.py`. Änderungen an der Kernlogik weiter in **beiden** Implementierungen.
 
 ## Aufbau
-`translator/`: `documents.py` (lesen, Überschriften erkennen) · `chunking.py` · `pipeline.py` (ohne GUI) · `llm_client.py` ·
+`translator/`: `documents.py` (lesen, Überschriften erkennen, Bilder sammeln) · `chunking.py` · `pipeline.py` (ohne GUI) · `images.py` · `eta.py` · `llm_client.py` ·
 `prompts.py` · `glossary.py` · `exporters.py` (Blöcke → TXT/MD/DOCX/PDF/EPUB) · `config.py` · `gui.py` (Worker-Thread → Queue → GUI;
 Original | Übersetzung nebeneinander, Abschnittsmarken `sec<n>` als Tk-Marks) · `dialogs.py` (Glossar-Editor, Suchen/Ersetzen). Nicht getestet: echte LM-Studio-Antworten und das Aussehen der GUI im Alltag.

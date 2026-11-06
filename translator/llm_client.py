@@ -10,7 +10,12 @@ import requests
 
 
 class LLMError(Exception):
-    pass
+    """`transient` = voraussichtlich vorübergehend (Verbindung abgerissen, Zeitüberschreitung, Serverfehler 5xx): ein
+    erneuter Versuch lohnt sich. Falsche Zugangsdaten oder eine ungültige Anfrage (4xx) bleiben dauerhaft."""
+
+    def __init__(self, message: str, transient: bool = False):
+        super().__init__(message)
+        self.transient = transient
 
 
 @dataclass(frozen=True)
@@ -38,13 +43,13 @@ class LLMClient:
         try:
             response = self._session.request(method, url, headers=self._headers(), timeout=timeout, **kwargs)
         except requests.Timeout as exc:
-            raise LLMError(f"Zeitüberschreitung bei {url}") from exc
+            raise LLMError(f"Zeitüberschreitung bei {url}", transient=True) from exc
         except requests.RequestException as exc:
-            raise LLMError(f"Server nicht erreichbar ({url}): {exc}") from exc
+            raise LLMError(f"Server nicht erreichbar ({url}): {exc}", transient=True) from exc
         if response.status_code == 401:
             raise LLMError("Nicht autorisiert - API-Schlüssel prüfen.")
         if response.status_code != 200:
-            raise LLMError(f"Serverfehler {response.status_code}: {response.text[:300]}")
+            raise LLMError(f"Serverfehler {response.status_code}: {response.text[:300]}", transient=response.status_code >= 500)
         try:
             return response.json()
         except ValueError as exc:
@@ -84,14 +89,14 @@ class LLMClient:
         try:
             response = self._session.post(url, headers=self._headers(), json=payload, timeout=timeout, stream=True)
         except requests.Timeout as exc:
-            raise LLMError(f"Zeitüberschreitung bei {url}") from exc
+            raise LLMError(f"Zeitüberschreitung bei {url}", transient=True) from exc
         except requests.RequestException as exc:
-            raise LLMError(f"Server nicht erreichbar ({url}): {exc}") from exc
+            raise LLMError(f"Server nicht erreichbar ({url}): {exc}", transient=True) from exc
         with response:
             if response.status_code == 401:
                 raise LLMError("Nicht autorisiert - API-Schlüssel prüfen.")
             if response.status_code != 200:
-                raise LLMError(f"Serverfehler {response.status_code}: {response.text[:300]}")
+                raise LLMError(f"Serverfehler {response.status_code}: {response.text[:300]}", transient=response.status_code >= 500)
             parts: list[str] = []
             finish_reason = ""
             try:
@@ -112,7 +117,7 @@ class LLMClient:
                         on_delta(delta)
                     finish_reason = choice.get("finish_reason") or finish_reason
             except requests.RequestException as exc:
-                raise LLMError(f"Verbindung während der Übersetzung abgebrochen: {exc}") from exc
+                raise LLMError(f"Verbindung während der Übersetzung abgebrochen: {exc}", transient=True) from exc
             except (ValueError, KeyError, IndexError, TypeError) as exc:
                 raise LLMError(f"Unerwartetes Stream-Format: {exc}") from exc
         if not finish_reason:  # Stream ohne Abschluss: lieber als abgeschnitten behandeln als als fertig

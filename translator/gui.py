@@ -5,18 +5,21 @@ import dataclasses
 import logging
 import queue
 import threading
+import time
 import tkinter as tk
 from tkinter import filedialog, messagebox, scrolledtext, ttk
 
-from .chunking import split_into_chunks
+from .chunking import Chunk, split_into_chunks
 from .config import Config
 from .documents import SUPPORTED_EXTENSIONS, read_document
 from .dialogs import FindReplaceDialog, GlossaryDialog
+from .eta import eta_text
 from .exporters import SAVE_FILETYPES, save_document
 from .glossary import format_glossary, parse_glossary
+from .images import ImageCollector
 from .languages import DISPLAY_LIST, code_from_display, display_name
 from .llm_client import LLMClient
-from .pipeline import Cancelled, ChunkResult, TranslationPipeline
+from .pipeline import CONNECTION_RETRY_DELAYS, Cancelled, ChunkResult, TranslationPipeline, build_context
 
 log = logging.getLogger(__name__)
 POLL_MS = 100
@@ -35,6 +38,17 @@ class TranslatorApp:
         self.sections: list[int] = []  # Abschnittsnummern in Reihenfolge; Marke 'sec<n>' in beiden Textfeldern
         self.warning_sections: list[int] = []  # Abschnitt je Zeile der Hinweisliste
         self.live: int | None = None  # Abschnitt, der gerade gestreamt wird
+        self.interrupted: int | None = None  # Abschnitt, dessen Stream durch Abbruch/Fehler unvollständig blieb
+
+        self.images = ImageCollector()  # Bilder des geöffneten Dokuments (Platzhalter [[Bild n]] im Text)
+        self.pending: list[Chunk] = []  # noch nicht übersetzte Abschnitte: Grundlage für „Fortsetzen“
+        self.total = 0  # Abschnitte insgesamt (Nummerierung bleibt beim Fortsetzen erhalten)
+        self.glossary: dict[str, str] = {}
+        self.run_config: Config | None = None
+        self.last_result: ChunkResult | None = None
+        self.run_started = 0.0  # für die Restzeit: Beginn des Laufs, Zeichen gesamt/fertig in diesem Lauf
+        self.run_total_chars = 0
+        self.run_done_chars = 0
 
         root.title("AI-Translator")
         root.geometry("1100x700")
@@ -58,6 +72,8 @@ class TranslatorApp:
         self.open_btn.pack(side=tk.LEFT)
         self.cancel_btn = ttk.Button(bar, text="Abbrechen", command=self.cancel.set, state=tk.DISABLED)
         self.cancel_btn.pack(side=tk.LEFT, padx=4)
+        self.resume_btn = ttk.Button(bar, text="Fortsetzen", command=self.resume, state=tk.DISABLED)
+        self.resume_btn.pack(side=tk.LEFT)
 
         self.source_combo = self._lang_combo(bar, self.config.lang_source)
         ttk.Label(bar, text="→").pack(side=tk.LEFT)
@@ -135,15 +151,35 @@ class TranslatorApp:
             return
         self.cancel.clear()
         self._clear_results()
+        self.images = ImageCollector()
+        self.pending, self.total, self.glossary, self.last_result = [], 0, {}, None
         self.progress.configure(value=0)
         self._set_running(True)
-        config = dataclasses.replace(self.config)  # Schnappschuss für den Worker
-        self.worker = threading.Thread(target=self._run_pipeline, args=(path, config), daemon=True)
+        config = self.run_config = dataclasses.replace(self.config)  # Schnappschuss für den Worker
+        self.worker = threading.Thread(target=self._guarded, args=(self._load_and_translate, path, config), daemon=True)
+        self.worker.start()
+
+    def resume(self) -> None:
+        """Übersetzung nach Abbruch oder Fehler mit den noch offenen Abschnitten fortsetzen."""
+        if not self.pending or self.run_config is None or (self.worker is not None and self.worker.is_alive()):
+            return
+        config = self.run_config
+        self._drop_interrupted()
+        context = None
+        if config.use_context and self.last_result is not None:
+            context = build_context(self.last_result.source, self.last_result.translation)
+        self.cancel.clear()
+        self._set_running(True)
+        self.status.set("Setze fort…")
+        self.worker = threading.Thread(
+            target=self._guarded, daemon=True,
+            args=(self._translate_pending, self._make_pipeline(config), config, list(self.pending), self.glossary, self.total, context))
         self.worker.start()
 
     def _set_running(self, running: bool) -> None:
         self.open_btn.configure(state=tk.DISABLED if running else tk.NORMAL)
         self.cancel_btn.configure(state=tk.NORMAL if running else tk.DISABLED)
+        self.resume_btn.configure(state=tk.NORMAL if self.pending and not running else tk.DISABLED)
 
     def _has_unsaved(self) -> bool:
         return bool(self.output.get("1.0", "end-1c").strip()) and bool(self.output.edit_modified())
@@ -170,7 +206,7 @@ class TranslatorApp:
         if not path:
             return
         try:
-            save_document(content, path, self.config.lang_target)
+            save_document(content, path, self.config.lang_target, images=self.images.images.get)
         except Exception as exc:
             log.exception("Speichern fehlgeschlagen")
             messagebox.showerror("Fehler", f"Speichern fehlgeschlagen: {exc}")
@@ -237,32 +273,43 @@ class TranslatorApp:
     def _emit(self, kind: str, *payload) -> None:
         self.events.put((kind, *payload))
 
-    def _run_pipeline(self, path: str, config: Config) -> None:
+    def _make_pipeline(self, config: Config) -> TranslationPipeline:
+        return TranslationPipeline(LLMClient(config.base_url, config.api_key), config,
+                                   on_retry=lambda attempt, reason: self._emit("retry", attempt, reason))
+
+    def _guarded(self, work, *args) -> None:
         try:
-            self._emit("status", "Extrahiere Text…")
-            text = read_document(path)
-            if not text:
-                raise ValueError("Die Datei konnte nicht gelesen werden oder ist leer.")
-            chunks = split_into_chunks(text, config.max_chunk_chars)
-            pipeline = TranslationPipeline(LLMClient(config.base_url, config.api_key), config)
-
-            if not config.is_translategemma:
-                self._emit("status", "KI analysiert Begriffe…")
-            glossary = pipeline.build_glossary(chunks, review=None if config.is_translategemma else self._review_glossary)
-            self._emit("status", f"Glossar: {len(glossary)} Begriffe")
-
-            on_delta = None
-            if config.stream:
-                def on_delta(chunk, delta):
-                    self._emit("delta", chunk.index, chunk.text, delta, len(chunks))
-            for result in pipeline.translate(chunks, glossary, self.cancel, on_delta):
-                self._emit("result", result, len(chunks))
+            work(*args)
             self._emit("done", "Übersetzung abgeschlossen.")
         except Cancelled:
             self._emit("done", "Abgebrochen.")
         except Exception as exc:
             log.exception("Pipeline-Fehler")
             self._emit("error", str(exc))
+
+    def _load_and_translate(self, path: str, config: Config) -> None:
+        self._emit("status", "Extrahiere Text…")
+        text = read_document(path, self.images)
+        if not text:
+            raise ValueError("Die Datei konnte nicht gelesen werden oder ist leer.")
+        chunks = split_into_chunks(text, config.max_chunk_chars)
+        pipeline = self._make_pipeline(config)
+
+        if not config.is_translategemma:
+            self._emit("status", "KI analysiert Begriffe…")
+        glossary = pipeline.build_glossary(chunks, review=None if config.is_translategemma else self._review_glossary)
+        self._emit("status", f"Glossar: {len(glossary)} Begriffe")
+        self._translate_pending(pipeline, config, chunks, glossary, len(chunks), None)
+
+    def _translate_pending(self, pipeline: TranslationPipeline, config: Config, chunks: list[Chunk],
+                           glossary: dict[str, str], total: int, context) -> None:
+        self._emit("plan", chunks, glossary, total)
+        on_delta = None
+        if config.stream:
+            def on_delta(chunk, delta):
+                self._emit("delta", chunk.index, chunk.text, delta, total)
+        for result in pipeline.translate(chunks, glossary, self.cancel, on_delta, initial_context=context):
+            self._emit("result", result, total)
 
     def _review_glossary(self, glossary: dict[str, str]) -> dict[str, str]:
         """Blockiert den Worker, bis der Benutzer das Glossar im Dialog bestätigt hat."""
@@ -284,6 +331,25 @@ class TranslatorApp:
     def _on_status(self, text: str) -> None:
         self.status.set(text)
 
+    def _on_plan(self, chunks: list[Chunk], glossary: dict[str, str], total: int) -> None:
+        """Ein Lauf beginnt: offene Abschnitte merken (für „Fortsetzen“) und die Zeitmessung für die Restzeit starten."""
+        self.pending = list(chunks)
+        self.glossary = glossary
+        self.total = total
+        self.run_started = time.monotonic()
+        self.run_total_chars = sum(len(c.text) for c in chunks)
+        self.run_done_chars = 0
+
+    def _eta_suffix(self) -> str:
+        text = eta_text(time.monotonic() - self.run_started, self.run_done_chars, self.run_total_chars)
+        return f" – {text}" if text else ""
+
+    def _on_retry(self, attempt: int, reason: str) -> None:
+        """Verbindung abgerissen: der begonnene Stream ist verloren, der Abschnitt wird neu übersetzt."""
+        if self.live is not None:
+            self.output.delete(f"sec{self.live}", "end-1c")
+        self.status.set(f"Verbindung unterbrochen, neuer Versuch {attempt}/{len(CONNECTION_RETRY_DELAYS)}: {reason[:90]}")
+
     def _on_delta(self, index: int, source: str, delta: str, total: int) -> None:
         """Neues Textstück der laufenden Übersetzung ans Ende hängen (Abschnitt wird beim ersten Stück angelegt)."""
         if self.live != index:
@@ -292,7 +358,7 @@ class TranslatorApp:
             self._add_section(self.source_view, index, source)
             self._add_section(self.output, index, "")
             self._highlight_source(index)
-            self.status.set(f"Abschnitt {index}/{total} wird übersetzt…")
+            self.status.set(f"Abschnitt {index}/{total} wird übersetzt…{self._eta_suffix()}")
         follow = self.output.yview()[1] >= 0.999  # nur mitscrollen, wenn der Benutzer am Ende steht
         self.output.insert(tk.END, delta)
         if follow:
@@ -303,7 +369,27 @@ class TranslatorApp:
         if self.live is not None:
             self.warnings.insert(tk.END, f"Abschnitt {self.live}: {reason}")
             self.warning_sections.append(self.live)
+            self.interrupted = self.live
             self.live = None
+
+    def _drop_interrupted(self) -> None:
+        """Vor dem Fortsetzen den angefangenen Abschnitt entfernen: er wird komplett neu übersetzt."""
+        n, self.interrupted = self.interrupted, None
+        if n is None or n not in self.sections:
+            return
+        for widget in (self.source_view, self.output):
+            widget.configure(state=tk.NORMAL)
+            widget.delete(f"sec{n} -2c", tk.END)  # samt Trennzeilen vor dem Abschnitt
+            widget.mark_unset(f"sec{n}")
+            if widget is self.source_view:
+                widget.configure(state=tk.DISABLED)
+        self.sections.remove(n)
+        kept = [(self.warnings.get(i), sec) for i, sec in enumerate(self.warning_sections) if sec != n]
+        self.warnings.delete(0, tk.END)
+        self.warning_sections = [sec for _text, sec in kept]
+        for text, _sec in kept:
+            self.warnings.insert(tk.END, text)
+        self._highlight_source(None)
 
     def _on_result(self, result: ChunkResult, total: int) -> None:
         if self.live == result.index:  # Streamtext durch das endgültige Ergebnis ersetzen
@@ -320,18 +406,21 @@ class TranslatorApp:
             self.warnings.insert(tk.END, f"Abschnitt {result.index}: {warning}")
             self.warning_sections.append(result.index)
         self.output.see(tk.END)
+        self.pending = [c for c in self.pending if c.index != result.index]
+        self.last_result = result
+        self.run_done_chars += len(result.source)
         self.progress.configure(value=result.index * 100 / total)
-        self.status.set(f"Abschnitt {result.index}/{total} übersetzt")
+        self.status.set(f"Abschnitt {result.index}/{total} übersetzt{self._eta_suffix()}")
 
     def _on_done(self, text: str) -> None:
         self._close_live("unvollständig (abgebrochen)")
-        self.status.set(text)
+        self.status.set(f"{text} {len(self.pending)} Abschnitte offen („Fortsetzen“)." if self.pending else text)
         self._set_running(False)
         self.output.edit_reset()  # Strg+Z soll Handarbeit zurücknehmen, nicht ganze Abschnitte
 
     def _on_error(self, text: str) -> None:
         self._close_live("unvollständig (Fehler)")
-        self.status.set("Fehler")
+        self.status.set("Fehler" + (f" – {len(self.pending)} Abschnitte offen („Fortsetzen“)" if self.pending else ""))
         self._set_running(False)
         messagebox.showerror("Fehler", text)
 

@@ -4,12 +4,15 @@ daraus entstehen alle Formate: Überschriften werden echte Überschriften, Absä
 from __future__ import annotations
 
 import html
+import io
 import re
 import time
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 
+from .images import ImageAsset, extension_for_mime, image_id_of_line, sniff_size
 from .languages import normalize_code
 
 SAVE_FILETYPES = [("Text", "*.txt"), ("Markdown", "*.md"), ("Word", "*.docx"), ("PDF", "*.pdf"), ("EPUB", "*.epub")]
@@ -36,9 +39,13 @@ _INLINE = re.compile(r"\*\*(?=\S)(.+?)(?<=\S)\*\*|\*(?=\S)(.+?)(?<=\S)\*")
 
 @dataclass(frozen=True)
 class Block:
-    kind: str  # "heading" | "paragraph"
+    kind: str  # "heading" | "paragraph" | "image"
     text: str
     level: int = 0  # nur für Überschriften (1-6)
+    image_id: int = 0  # nur für Bilder (Nummer aus dem Platzhalter [[Bild n]])
+
+
+ImageLookup = Callable[[int], "ImageAsset | None"]
 
 
 def parse_blocks(content: str) -> list[Block]:
@@ -49,7 +56,13 @@ def parse_blocks(content: str) -> list[Block]:
         lines: list[str] = []
         for line in chunk.split("\n"):
             heading = _HEADING_LINE.match(line.strip())
-            if heading:
+            image_id = image_id_of_line(line)
+            if image_id is not None:
+                if lines:
+                    blocks.append(Block("paragraph", "\n".join(lines)))
+                    lines = []
+                blocks.append(Block("image", "", image_id=image_id))
+            elif heading:
                 if lines:
                     blocks.append(Block("paragraph", "\n".join(lines)))
                     lines = []
@@ -104,38 +117,68 @@ def split_chapters(blocks: list[Block], title: str) -> list[tuple[str, list[Bloc
     return chapters
 
 
+# TXT und MD sind einzelne Textdateien: Bilder haben dort keinen Platz und entfallen.
 def to_markdown(blocks: list[Block]) -> str:
-    return "\n\n".join(f"{'#' * b.level} {b.text}" if b.kind == "heading" else b.text for b in blocks) + "\n"
+    return "\n\n".join(f"{'#' * b.level} {b.text}" if b.kind == "heading" else b.text
+                        for b in blocks if b.kind != "image") + "\n"
 
 
 def to_plain_text(blocks: list[Block]) -> str:
-    return "\n\n".join(strip_inline(b.text) for b in blocks) + "\n"
+    return "\n\n".join(strip_inline(b.text) for b in blocks if b.kind != "image") + "\n"
 
 
-def save_document(content: str, path: Path | str, language: str = "de", title: str | None = None) -> None:
+def save_document(content: str, path: Path | str, language: str = "de", title: str | None = None,
+                  images: ImageLookup | None = None) -> None:
+    """`images` liefert zu einer Bild-Nummer das Bild. In DOCX, PDF und EPUB stehen die Bilder an der Stelle ihres Platzhalters
+    `[[Bild n]]`; TXT und MD lassen sie weg."""
+    images = images or (lambda _id: None)
     path = Path(path)
     blocks = parse_blocks(content)
     title = title or path.stem
     ext = path.suffix.lower()
     if ext == ".docx":
-        _save_docx(blocks, path, title)
+        _save_docx(blocks, path, title, images)
     elif ext == ".pdf":
-        _save_pdf(blocks, path, title)
+        _save_pdf(blocks, path, title, images)
     elif ext == ".epub":
-        _save_epub(blocks, path, title, normalize_code(language))
+        _save_epub(blocks, path, title, normalize_code(language), images)
     elif ext == ".md":
         path.write_text(to_markdown(blocks), encoding="utf-8")
     else:
         path.write_text(to_plain_text(blocks), encoding="utf-8")
 
 
-def _save_docx(blocks: list[Block], path: Path, title: str) -> None:
+_DOCX_MAX_WIDTH_INCHES = 6  # passt in den Satzspiegel von A4 und Letter
+_DOCX_MAX_HEIGHT_INCHES = 8
+
+
+def _add_docx_picture(doc, asset: ImageAsset) -> None:
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+    from docx.image.image import Image
+    from docx.shared import Inches
+
+    try:
+        Image.from_blob(asset.data)  # prüft vorher: SVG und WebP kann Word hier nicht einbetten (kein halber Absatz)
+    except Exception:
+        return
+    shape = doc.add_picture(io.BytesIO(asset.data))
+    scale = min(1.0, Inches(_DOCX_MAX_WIDTH_INCHES) / shape.width, Inches(_DOCX_MAX_HEIGHT_INCHES) / shape.height)
+    shape.width, shape.height = int(shape.width * scale), int(shape.height * scale)
+    doc.paragraphs[-1].alignment = WD_ALIGN_PARAGRAPH.CENTER
+
+
+def _save_docx(blocks: list[Block], path: Path, title: str, images: ImageLookup) -> None:
     from docx import Document
 
     doc = Document()
     doc.core_properties.title = title
     level = chapter_level(blocks)
     for i, block in enumerate(blocks):
+        if block.kind == "image":
+            asset = images(block.image_id)
+            if asset is not None:
+                _add_docx_picture(doc, asset)
+            continue
         if block.kind == "heading":
             heading = doc.add_heading(strip_inline(block.text), min(block.level, 9))
             if i and level and block.level <= level:
@@ -159,7 +202,29 @@ def _pdf_font_files() -> dict[str, str]:
     return {}
 
 
-def _save_pdf(blocks: list[Block], path: Path, title: str) -> None:
+_PX_TO_MM = 25.4 / 96  # Bildschirm-Pixel (96 dpi) in Millimeter
+
+
+def _draw_pdf_image(pdf, asset: ImageAsset) -> None:
+    """Bild in Seitenbreite (höchstens natürliche Größe), zentriert; passt es nicht mehr auf die Seite, kommt eine neue."""
+    size = sniff_size(asset.data)
+    if size is None:  # unbekanntes Format (z. B. SVG)
+        return
+    width = min(pdf.epw, size[0] * _PX_TO_MM)
+    height = width * size[1] / size[0]
+    if height > pdf.eph:
+        width, height = width * pdf.eph / height, pdf.eph
+    if pdf.get_y() + height > pdf.page_break_trigger:
+        pdf.add_page()
+    top = pdf.get_y()
+    try:
+        pdf.image(io.BytesIO(asset.data), x=pdf.l_margin + (pdf.epw - width) / 2, y=top, w=width, h=height)
+    except Exception:
+        return  # Format, das fpdf2 nicht lesen kann: Bild weglassen statt den Export abzubrechen
+    pdf.set_y(top + height + 4)
+
+
+def _save_pdf(blocks: list[Block], path: Path, title: str, images: ImageLookup) -> None:
     from fpdf import FPDF
 
     pdf = FPDF()
@@ -181,6 +246,11 @@ def _save_pdf(blocks: list[Block], path: Path, title: str) -> None:
     level = chapter_level(blocks)
     outline_depth = 0
     for i, block in enumerate(blocks):
+        if block.kind == "image":
+            asset = images(block.image_id)
+            if asset is not None:
+                _draw_pdf_image(pdf, asset)
+            continue
         if block.kind == "heading":
             size = _HEADING_PT.get(block.level, 12)
             if i and level and block.level <= level:
@@ -208,13 +278,17 @@ def _html_inline(text: str) -> str:
     return "".join(parts)
 
 
-def _html_block(block: Block) -> str:
+def _html_block(block: Block, image_hrefs: dict[int, str] | None = None) -> str:
+    if block.kind == "image":
+        href = (image_hrefs or {}).get(block.image_id)
+        return (f'<p style="text-align:center;text-indent:0"><img src="{href}" alt="Bild {block.image_id}" '
+                f'style="max-width:100%;height:auto"/></p>') if href else ""
     if block.kind == "heading":
         return f"<h{block.level}>{html.escape(strip_inline(block.text))}</h{block.level}>"
     return f"<p>{_html_inline(block.text)}</p>"
 
 
-def _save_epub(blocks: list[Block], path: Path, title: str, language: str) -> None:
+def _save_epub(blocks: list[Block], path: Path, title: str, language: str, images: ImageLookup) -> None:
     from ebooklib import epub
 
     book = epub.EpubBook()
@@ -222,9 +296,18 @@ def _save_epub(blocks: list[Block], path: Path, title: str, language: str) -> No
     book.set_title(title)
     book.set_language(language)
 
+    # Jedes Bild nur einmal ablegen, auch wenn es mehrfach vorkommt (Zierlinien)
+    image_hrefs: dict[int, str] = {}
+    for image_id in dict.fromkeys(b.image_id for b in blocks if b.kind == "image"):
+        asset = images(image_id)
+        if asset is not None:
+            href = f"images/img_{image_id}.{extension_for_mime(asset.mime)}"
+            book.add_item(epub.EpubItem(uid=f"img{image_id}", file_name=href, media_type=asset.mime, content=asset.data))
+            image_hrefs[image_id] = href
+
     chapters = []
     for n, (chapter_title, chapter_blocks) in enumerate(split_chapters(blocks, title), start=1):
-        body = "".join(_html_block(b) for b in chapter_blocks)
+        body = "".join(_html_block(b, image_hrefs) for b in chapter_blocks)
         if not any(b.kind == "heading" for b in chapter_blocks):  # Dokument ohne Überschriften
             body = f"<h1>{html.escape(chapter_title)}</h1>{body}"
         chapter = epub.EpubHtml(title=chapter_title, file_name=f"chap_{n}.xhtml", lang=language)

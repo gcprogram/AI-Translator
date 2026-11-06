@@ -2,11 +2,14 @@
 from __future__ import annotations
 
 import logging
+import posixpath
 import re
 from collections import Counter
 from pathlib import Path
+from urllib.parse import unquote
 
 from .chunking import heading_level
+from .images import ImageCollector, image_id_of_line, image_token, mime_for_extension, sniff_mime
 
 log = logging.getLogger(__name__)
 
@@ -24,15 +27,22 @@ _NUMBER_RE = re.compile(r"^(?:\d{1,3}|[IVXLC]{1,7})[.)]?$")
 _MAX_HEADING_CHARS = 80
 _MAX_SUBTITLE_CHARS = 60
 _PAGE_MARGIN = 0.08  # oberer/unterer Seitenstreifen (Anteil der Höhe), in dem Seitenzahlen stehen
+_MIN_IMAGE_PIXELS = 40  # kleinere Bilder (Linien, Zierpunkte) gehören nicht zur Übersetzung
+_MIN_IMAGE_POINTS = 20
 
 
-def read_document(path: Path | str) -> str:
+def read_document(path: Path | str, images: ImageCollector | None = None) -> str:
+    """Mit `images` werden Bilder aus EPUB, DOCX und PDF gesammelt und stehen als Absatz `[[Bild n]]` an ihrer Stelle im
+    Text; ohne bleiben sie unberücksichtigt."""
     path = Path(path)
     ext = path.suffix.lower()
-    readers = {".txt": _read_text, ".md": _read_text, ".pdf": _read_pdf, ".docx": _read_docx, ".epub": _read_epub}
+    readers = {
+        ".txt": lambda: _read_text(path), ".md": lambda: _read_text(path), ".pdf": lambda: _read_pdf(path, images),
+        ".docx": lambda: _read_docx(path, images), ".epub": lambda: _read_epub(path, images),
+    }
     if ext not in readers:
         raise ValueError(f"Dateiformat {ext or '(ohne Endung)'} wird nicht unterstützt.")
-    return mark_headings(readers[ext](path).strip())
+    return mark_headings(readers[ext]().strip())
 
 
 def _normalize_newlines(text: str) -> str:
@@ -57,15 +67,15 @@ def _join_paragraphs(paragraphs: list[str]) -> str:
         paragraph = paragraph.strip()
         if not paragraph:
             continue
-        if (result and not heading_level(result[-1]) and not result[-1].endswith(_TERMINAL_PUNCTUATION)
-                and paragraph[0].islower()):
+        if (result and not heading_level(result[-1]) and image_id_of_line(result[-1]) is None
+                and not result[-1].endswith(_TERMINAL_PUNCTUATION) and paragraph[0].islower()):
             result[-1] += " " + paragraph
         else:
             result.append(paragraph)
     return "\n\n".join(result)
 
 
-def _read_pdf(path: Path) -> str:
+def _read_pdf(path: Path, images: ImageCollector | None = None) -> str:
     import pymupdf
 
     blocks: list[tuple[str, float, bool]] = []  # (Text, mittlere Schriftgröße, liegt am Seitenrand)
@@ -73,7 +83,13 @@ def _read_pdf(path: Path) -> str:
         for page in doc:
             margin = page.rect.height * _PAGE_MARGIN
             for block in page.get_text("dict", sort=True)["blocks"]:
-                if block.get("type") != 0:  # Bild
+                if block.get("type") != 0:  # Bild: als Platzhalter an der Stelle im Lesefluss
+                    if images is not None and block.get("image"):
+                        x0, y0, x1, y1 = block["bbox"]
+                        if (min(block.get("width", 0), block.get("height", 0)) >= _MIN_IMAGE_PIXELS
+                                and min(x1 - x0, y1 - y0) >= _MIN_IMAGE_POINTS):
+                            mime = sniff_mime(block["image"]) or mime_for_extension(block.get("ext", ""))
+                            blocks.append((image_token(images.add(block["image"], mime)), 0.0, False))
                     continue
                 lines = [[sp for sp in line["spans"] if sp["text"].strip()] for line in block["lines"]]
                 lines = [line for line in lines if line]
@@ -151,12 +167,13 @@ def _is_subtitle(text: str) -> bool:
             and len(text.split()) <= 8 and not text.endswith(_TERMINAL_PUNCTUATION))
 
 
-def _read_docx(path: Path) -> str:
+def _read_docx(path: Path, images: ImageCollector | None = None) -> str:
     from docx import Document
     from docx.table import Table
 
+    document = Document(path)
     blocks: list[str] = []
-    for item in Document(path).iter_inner_content():
+    for item in document.iter_inner_content():
         if isinstance(item, Table):
             for row in item.rows:
                 cells = [cell.text.strip() for cell in row.cells]
@@ -164,19 +181,34 @@ def _read_docx(path: Path) -> str:
                     blocks.append(" | ".join(cells))
             continue
         text = item.text.strip()
-        if not text:
-            continue
-        style = item.style.name if item.style is not None else ""
-        if style == "Title":
-            text = f"# {text}"
-        elif style.startswith("Heading"):
-            digits = re.search(r"\d+", style)
-            text = f"{'#' * min(int(digits.group()) if digits else 1, 6)} {text}"
-        blocks.append(text)
+        if text:
+            style = item.style.name if item.style is not None else ""
+            if style == "Title":
+                text = f"# {text}"
+            elif style.startswith("Heading"):
+                digits = re.search(r"\d+", style)
+                text = f"{'#' * min(int(digits.group()) if digits else 1, 6)} {text}"
+            blocks.append(text)
+        if images is not None:  # Bilder des Absatzes (DrawingML und älteres VML) hinter dem Text
+            xpath = ".//*[local-name()='blip']/@*[local-name()='embed'] | .//*[local-name()='imagedata']/@*[local-name()='id']"
+            for rel_id in item._p.xpath(xpath):
+                part = document.part.related_parts.get(rel_id)
+                if part is not None and part.blob:
+                    blocks.append(image_token(images.add(part.blob, sniff_mime(part.blob) or part.content_type)))
     return "\n\n".join(blocks)
 
 
-def _read_epub(path: Path) -> str:
+def _epub_image(by_name: dict, chapter_name: str, source: str):
+    """Das Bild-Element des Buches zu einem src-Wert: relativ zum Kapitel, absolut ab Archivwurzel oder (Notbehelf) per Dateiname."""
+    target = unquote(source.split("#")[0])
+    candidates = [posixpath.normpath(posixpath.join(posixpath.dirname(chapter_name), target)), target.lstrip("/")]
+    for name in candidates:
+        if name in by_name:
+            return by_name[name]
+    return next((item for name, item in by_name.items() if name.endswith("/" + posixpath.basename(target))), None)
+
+
+def _read_epub(path: Path, images: ImageCollector | None = None) -> str:
     import ebooklib
     from bs4 import BeautifulSoup
     from ebooklib import epub
@@ -187,15 +219,26 @@ def _read_epub(path: Path) -> str:
     if not items:  # kein brauchbarer Spine: alle Dokumente in Manifest-Reihenfolge
         items = list(book.get_items_of_type(ebooklib.ITEM_DOCUMENT))
 
+    by_name = {i.get_name(): i for i in book.get_items() if (i.media_type or "").startswith("image/")} if images else {}
     blocks: list[str] = []
     for item in items:
         content = item.get_content()
         for parser in ("lxml-xml", "lxml"):
             soup = BeautifulSoup(content, parser)
-            found = soup.find_all(["h1", "h2", "h3", "h4", "h5", "h6", "p", "li", "blockquote"])
+            # img/image stehen in Dokumentreihenfolge zwischen den Textabsätzen: so bleibt ein Bild an seiner Stelle
+            found = soup.find_all(["h1", "h2", "h3", "h4", "h5", "h6", "p", "li", "blockquote", "img", "image"])
             if found:
                 break
         for tag in found:
+            if tag.name in ("img", "image"):
+                source = tag.get("src") or tag.get("xlink:href") or tag.get("href")
+                if images is not None and source and not source.startswith("data:") and "://" not in source:
+                    image_item = _epub_image(by_name, item.get_name(), source)
+                    if image_item is not None and image_item.get_content():
+                        data = image_item.get_content()
+                        blocks.append(image_token(images.add(data, sniff_mime(data) or image_item.media_type
+                                                             or mime_for_extension(Path(source).suffix))))
+                continue
             if tag.name == "blockquote" and tag.find("p"):
                 continue  # Inhalt wird über die enthaltenen <p> erfasst
             text = re.sub(r"\s+", " ", tag.get_text()).strip()
