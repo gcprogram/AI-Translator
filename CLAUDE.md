@@ -41,7 +41,7 @@ Der Chat-Teil lebt jetzt in `gcprogram/AI-Chat-MCP`.
   Bilder: Im Text stehen sie als eigener Absatz `[[Bild n]]` (`core/Images.kt`); `Pipeline.translateChunk` nimmt sie vor dem Modellaufruf
   heraus und setzt sie danach an dieselbe Absatzposition zurück (proportional, wenn das Modell die Absatzzahl ändert). Die Dateien liegen
   in `filesDir/images` (`ImageStore`), nicht im Speicher. Gelesen aus EPUB (img/svg-image in Dokumentreihenfolge) und DOCX (Beziehungen),
-  geschrieben in DOCX/EPUB/PDF; nicht aus PDF. Fortsetzen: `SessionData.pending` hält die noch offenen Abschnitte; `LlmException.transient`
+  geschrieben in DOCX/EPUB/PDF; aus PDF über den PDFBox-Operator Do mit Position (Mindestgröße gegen Zierpunkte); PDF-Lesezeichen entstehen nachträglich mit PDFBox (`PdfBookmarks`). Fortsetzen: `SessionData.pending` hält die noch offenen Abschnitte; `LlmException.transient`
   steuert die automatische Wiederholung (`CONNECTION_RETRY_DELAYS_MS`). Restzeit: `core/Eta.kt`.
   **Modell auf dem Gerät** (`ondevice/`, `app/src/main/cpp`): llama.cpp (fest b12164, `scripts/fetch-llama-cpp.sh` lädt es nach
   `android/third_party`, gitignored) als JNI-Bibliothek. `OnDeviceBackend` implementiert `LlmBackend.complete()` mit dem Roh-Prompt von
@@ -70,8 +70,8 @@ python main.py
 ```
 Android (`cd android`, JDK 17, `ANDROID_HOME` gesetzt):
 ```bash
-./gradlew testDebugUnitTest            # 130 JVM-Tests
-./gradlew connectedDebugAndroidTest    # 141 Tests auf Emulator/Gerät (zuvor ANDROID_SERIAL setzen); AVD z. B. aitranslator_test (API 36)
+./gradlew testDebugUnitTest            # 133 JVM-Tests
+./gradlew connectedDebugAndroidTest    # 146 Tests auf Emulator/Gerät (zuvor ANDROID_SERIAL setzen); AVD z. B. aitranslator_test (API 36)
 ```
 
 ## Offene Aufgaben (Reihenfolge)
@@ -91,9 +91,8 @@ Android (`cd android`, JDK 17, `ANDROID_HOME` gesetzt):
    (Zurück-Taste, Bildschirm aus: Lauf vollständig, Sperren danach frei); **echter Doze-Ruhezustand auf dem Handy noch nicht geprüft**
    (Knopf „Akku-Optimierung ausschalten“ in den Einstellungen als Rückfall). Android 15 begrenzt dataSync-Dienste auf rund 6 Stunden je Tag.
    On-Device-Backend ist gebaut und auf dem Galaxy S21 mit dem echten Modell geprüft (Abschnitt übersetzt, Speicher danach frei).
-   Offen: längerer Lauf auf dem Handy (viele Abschnitte, Hitze/Akku), PDF-Lesezeichen (Android: nachträglich mit PDFBox in das
-   `PdfDocument`-Ergebnis schreiben), Bilder aus PDF (PDFBox `Do`-Operator + Position). Desktop-Programm hat (noch) keine Bilder,
-   Restzeit-Schätzung, Fortsetzen und Verbindungswiederholung.
+   Offen: längerer Lauf auf dem Handy (viele Abschnitte, Hitze/Akku). Desktop-Programm hat (noch) keine Bilder, Restzeit-Schätzung,
+   Fortsetzen und Verbindungswiederholung.
 
 ## Aufbau
 `translator/`: `documents.py` (lesen, Überschriften erkennen) · `chunking.py` · `pipeline.py` (ohne GUI) · `llm_client.py` ·

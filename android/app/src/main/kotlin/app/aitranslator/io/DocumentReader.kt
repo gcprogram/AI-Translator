@@ -30,12 +30,12 @@ object DocumentReader {
     /**
      * [fileName] bestimmt das Format (nur die Endung zählt). Wirft [IllegalArgumentException] bei unbekanntem Format.
      * Mit [images] werden Bilder aus EPUB und DOCX gesammelt und stehen als Absatz `[[Bild n]]` an ihrer Stelle im Text;
-     * ohne bleiben sie unberücksichtigt. (Aus PDF werden noch keine Bilder übernommen.)
+     * ohne bleiben sie unberücksichtigt. Aus PDF kommen Bilder ab einer Mindestgröße (keine Linien, Masken, Zierpunkte).
      */
     fun read(fileName: String, bytes: ByteArray, images: ImageCollector? = null): String {
         val text = when (val ext = extensionOf(fileName)) {
             "txt", "md" -> readText(bytes)
-            "pdf" -> readPdf(bytes)
+            "pdf" -> readPdf(bytes, images)
             "docx" -> readDocx(bytes, images)
             "epub" -> readEpub(bytes, images)
             else -> throw IllegalArgumentException("Dateiformat ${if (ext.isEmpty()) "(ohne Endung)" else ".$ext"} wird nicht unterstützt.")
@@ -59,8 +59,8 @@ object DocumentReader {
 
     // --- PDF ---------------------------------------------------------------------------------
 
-    private fun readPdf(bytes: ByteArray): String =
-        joinParagraphs(markPdfHeadings(groupPdfLines(PdfTextExtractor.extractLines(bytes))))
+    private fun readPdf(bytes: ByteArray, images: ImageCollector?): String =
+        joinParagraphs(markPdfHeadings(groupPdfLines(PdfTextExtractor.extractLines(bytes, images))))
 
     // --- DOCX --------------------------------------------------------------------------------
 

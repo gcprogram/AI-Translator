@@ -67,7 +67,7 @@ PC unter `10.0.2.2` erreichbar. `LlmBackend` ist die Schnittstelle, hinter der b
 Für lange Bücher auf dem Handy:
 
 - **Bilder** aus EPUB und DOCX werden übernommen und stehen in der Übersetzung an derselben Absatzstelle (Platzhalter `[[Bild n]]`,
-  das Modell sieht sie nie; im Export als echte Bilder in DOCX, PDF und EPUB, TXT/MD lassen sie weg). Aus PDF werden noch keine Bilder übernommen.
+  das Modell sieht sie nie; im Export als echte Bilder in DOCX, PDF und EPUB, TXT/MD lassen sie weg). Aus PDF kommen Bilder ab einer Mindestgröße (keine Linien oder Zierpunkte).
 - **Restzeit-Schätzung** neben „Abschnitt x/y“, aus dem bisherigen Tempo hochgerechnet (nach Zeichen gewichtet).
 - **Verbindungsstörungen**: kurze Aussetzer werden automatisch wiederholt (3 s, 10 s, 30 s). Bricht es trotzdem ab, zeigt ein Kasten
   den Fehler im Wortlaut, und „Fortsetzen“ macht beim ersten offenen Abschnitt weiter, auch nach einem Neustart der App.
@@ -78,15 +78,14 @@ Für lange Bücher auf dem Handy:
   bleibt der Bildschirm an. Bricht die Verbindung trotzdem ab, hilft „Fortsetzen“.
 
 Unterschiede zum Desktop-Programm: Die Übersetzung steht in Abschnittskarten (Original einblendbar, „Neu“ übersetzt einen Abschnitt
-neu) statt in zwei Textfeldern; die Sitzung wird automatisch gesichert und nach einem Neustart wiederhergestellt; das PDF hat keine
-Lesezeichen (Androids `PdfDocument` bietet das nicht).
+neu) statt in zwei Textfeldern; die Sitzung wird automatisch gesichert und nach einem Neustart wiederhergestellt; der PDF-Export schreibt die Lesezeichen nachträglich mit PDFBox hinein.
 
 ```bash
 cd android
 ./gradlew assembleDebug            # APK: app/build/outputs/apk/debug/app-debug.apk
 ./gradlew installDebug             # auf ein angeschlossenes Gerät oder einen Emulator installieren
-./gradlew testDebugUnitTest        # 130 Tests auf der JVM, ohne Gerät
-./gradlew connectedDebugAndroidTest   # dieselben Tests + 11 Gerätetests auf Emulator/Gerät
+./gradlew testDebugUnitTest        # 133 Tests auf der JVM, ohne Gerät
+./gradlew connectedDebugAndroidTest   # dieselben Tests + 13 Gerätetests auf Emulator/Gerät
 ```
 
 Voraussetzungen: JDK 17 und Android SDK (`ANDROID_HOME`). Sind mehrere Geräte angeschlossen, vorher `ANDROID_SERIAL` setzen, sonst

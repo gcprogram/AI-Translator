@@ -35,20 +35,30 @@ object PdfExporter {
     private const val PIXEL_TO_POINT = 0.75f // 96 dpi am Bildschirm -> 72 pt je Zoll
     private const val MAX_IMAGE_PIXELS = 1600
 
+    /** Eine Überschrift und die Seite (ab 1), auf der sie steht: daraus entstehen die Lesezeichen. */
+    internal data class Bookmark(val level: Int, val title: String, val page: Int)
+
     fun write(blocks: List<Block>, title: String, out: OutputStream, images: (Int) -> ImageAsset? = { null }) {
         val document = PdfDocument()
+        val bookmarks: List<Bookmark>
+        val bytes = java.io.ByteArrayOutputStream()
         try {
-            Paginator(document, images).render(blocks)
-            document.writeTo(out)
+            val paginator = Paginator(document, images)
+            paginator.render(blocks)
+            document.writeTo(bytes)
+            bookmarks = paginator.bookmarks
         } finally {
             document.close()
         }
+        // PdfDocument kann keine Lesezeichen; PDFBox schreibt sie nachträglich hinein. Gelingt das nicht, bleibt das PDF ohne.
+        out.write(runCatching { PdfBookmarks.add(bytes.toByteArray(), bookmarks) }.getOrDefault(bytes.toByteArray()))
     }
 
     private class Paginator(private val document: PdfDocument, private val images: (Int) -> ImageAsset?) {
         private val textWidth = (PAGE_WIDTH - 2 * MARGIN).toInt()
         private val imagePaint = Paint(Paint.FILTER_BITMAP_FLAG or Paint.ANTI_ALIAS_FLAG)
         private val bottom = PAGE_HEIGHT - MARGIN
+        val bookmarks = mutableListOf<Bookmark>()
         private var pageNumber = 0
         private var page: PdfDocument.Page? = null
         private var y = MARGIN
@@ -88,6 +98,7 @@ object PdfExporter {
                     val layout = layoutOf(stripInline(block.text), headingPaint(block.level))
                     if (i > 0 && chapterLevel > 0 && block.level <= chapterLevel) newPage()
                     else if (y + layout.height + 60f > bottom) newPage() // Überschrift nicht allein am Seitenende
+                    bookmarks += Bookmark(block.level, stripInline(block.text), pageNumber)
                     draw(layout)
                     y += PARAGRAPH_GAP
                 } else {

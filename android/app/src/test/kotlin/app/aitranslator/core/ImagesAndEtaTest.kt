@@ -139,6 +139,41 @@ class ImagePlaceholderTest {
     }
 }
 
+class PdfImageLinesTest {
+    private val page = 842f
+
+    @Test
+    fun imageLineIsItsOwnBlockBetweenParagraphs() {
+        val lines = listOf(
+            PdfLine("Der Absatz davor", 11f, 100f, page, 1),
+            PdfLine("[[Bild 2]]", 0f, 112f, page, 1), // knapp darunter: würde sonst mit dem Text verschmelzen
+            PdfLine("und danach geht es klein weiter", 11f, 125f, page, 1),
+        )
+        assertEquals(listOf("Der Absatz davor", "[[Bild 2]]", "und danach geht es klein weiter"), groupPdfLines(lines).map { it.text })
+    }
+
+    @Test
+    fun textAfterAnImageIsNotMergedIntoItsPlaceholder() {
+        assertEquals(
+            "Davor ohne Punkt\n\n[[Bild 1]]\n\nklein danach",
+            joinParagraphs(listOf("Davor ohne Punkt", "[[Bild 1]]", "klein danach")),
+        )
+    }
+
+    @Test
+    fun placeholderNeitherBecomesAHeadingNorShiftsTheBodySize() {
+        val lines = listOf(
+            PdfLine("Das Grosse Buch", 24f, 100f, page, 1),
+            PdfLine("[[Bild 1]]", 0f, 140f, page, 1),
+            PdfLine("Ein normaler Absatz im Fliesstext des Buches.", 11f, 400f, page, 1),
+        )
+        assertEquals(
+            "# Das Grosse Buch\n\n[[Bild 1]]\n\nEin normaler Absatz im Fliesstext des Buches.",
+            joinParagraphs(markPdfHeadings(groupPdfLines(lines))),
+        )
+    }
+}
+
 class ImageFormatTest {
     @Test
     fun sniffsMimeFromContent() {

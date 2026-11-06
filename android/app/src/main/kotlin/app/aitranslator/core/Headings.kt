@@ -97,6 +97,11 @@ fun groupPdfLines(lines: List<PdfLine>): List<PdfBlock> {
 
     for (line in lines) {
         if (line.text.isBlank()) continue
+        if (imageIdOfLine(line.text) != null) { // Bildplatzhalter: immer ein eigener Absatz, nie mit Text verschmelzen
+            flush()
+            blocks.add(PdfBlock(line.text, 0f, false))
+            continue
+        }
         val last = current.lastOrNull()
         val sameBlock = last != null && last.page == line.page &&
             kotlin.math.abs(last.size - line.size) <= SAME_BLOCK_SIZE_DELTA &&
@@ -137,7 +142,7 @@ fun joinParagraphs(paragraphs: List<String>): String {
         val paragraph = raw.trim()
         if (paragraph.isEmpty()) continue
         val last = result.lastOrNull()
-        if (last != null && headingLevel(last) == 0 && !endsTerminal(last) && paragraph[0].isLowerCase()) {
+        if (last != null && headingLevel(last) == 0 && imageIdOfLine(last) == null && !endsTerminal(last) && paragraph[0].isLowerCase()) {
             result[result.lastIndex] = "$last $paragraph"
         } else {
             result.add(paragraph)

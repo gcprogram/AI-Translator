@@ -77,6 +77,46 @@ class PdfRoundTripTest {
     }
 
     @Test
+    fun bookmarksFollowTheHeadingsAndPointToTheirPages() {
+        val filler = "Lorem ipsum dolor sit amet, consetetur sadipscing elitr. ".repeat(20)
+        val bytes = pdf(
+            "# Das Buch\n\nVorwort. $filler\n\n# Kapitel 1\n\nText. $filler\n\n## Unterkapitel\n\nMehr. $filler\n\n# Kapitel 2\n\nEnde. $filler",
+        )
+        PDDocument.load(bytes.inputStream()).use { doc ->
+            val outline = doc.documentCatalog.documentOutline
+            assertNotNull("PDF hat Lesezeichen", outline)
+            val top = outline.children().toList()
+            assertEquals(listOf("Das Buch", "Kapitel 1", "Kapitel 2"), top.map { it.title })
+            assertEquals(listOf("Unterkapitel"), top[1].children().map { it.title }.toList()) // Ebene 2 hängt unter Kapitel 1
+            val pages = top.map { doc.pages.indexOf(it.findDestinationPage(doc)) }
+            assertEquals("Kapitel beginnen auf neuen Seiten: " + pages, pages.sorted(), pages)
+            assertTrue("Kapitel 2 steht nicht auf Seite 1: $pages", pages.last() >= 2)
+        }
+    }
+
+    @Test
+    fun imagesInAPdfComeBackAtTheirPositionAsPlaceholders() {
+        val bitmap = Bitmap.createBitmap(400, 200, Bitmap.Config.ARGB_8888).apply { eraseColor(Color.BLUE) }
+        val png = ByteArrayOutputStream().also { bitmap.compress(Bitmap.CompressFormat.PNG, 100, it) }.toByteArray()
+        val bytes = ByteArrayOutputStream().also {
+            Exporters.export(
+                ExportFormat.PDF, "Vor dem Bild steht dieser Satz.\n\n[[Bild 1]]\n\nNach dem Bild steht dieser Satz.", "Test", "de", it,
+                images = { id -> if (id == 1) ImageAsset(png, "image/png") else null },
+            )
+        }.toByteArray()
+
+        val collector = app.aitranslator.core.ImageCollector()
+        val text = DocumentReader.read("o.pdf", bytes, collector)
+        assertEquals("Vor dem Bild steht dieser Satz.\n\n[[Bild 1]]\n\nNach dem Bild steht dieser Satz.", text)
+        val image = collector.images.getValue(1)
+        assertTrue(image.mime, image.mime == "image/png" || image.mime == "image/jpeg")
+        assertEquals(400 to 200, app.aitranslator.core.sniffImageSize(image.bytes)) // Größe und Seitenverhältnis bleiben
+
+        // ohne Sammlung wie bisher: nur Text
+        assertEquals("Vor dem Bild steht dieser Satz.\n\nNach dem Bild steht dieser Satz.", DocumentReader.read("o.pdf", bytes))
+    }
+
+    @Test
     fun longParagraphSpansPagesWithoutLosingWords() {
         val words = (1..1500).joinToString(" ") { "wort$it" }
         val text = DocumentReader.read("o.pdf", pdf(words))
@@ -153,6 +193,15 @@ class StoresTest {
 /** Prüft die JNI-Brücke zu llama.cpp, ohne ein Modell zu brauchen: Bibliothek lädt, Fehler kommen als klare Meldung. */
 @RunWith(AndroidJUnit4::class)
 class NativeBridgeTest {
+    /** Ohne die native Bibliothek (Build mit -PnoNative) gibt es nichts zu prüfen: überspringen statt scheitern. */
+    @org.junit.Before
+    fun requireNativeLibrary() {
+        org.junit.Assume.assumeTrue(
+            "native Bibliothek nicht gebaut (-PnoNative)",
+            runCatching { System.loadLibrary("aitranslator_llama") }.isSuccess,
+        )
+    }
+
     @Test
     fun invalidDescriptorIsRejectedWithClearMessage() {
         val failure = org.junit.Assert.assertThrows(IllegalStateException::class.java) {
